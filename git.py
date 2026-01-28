@@ -6,207 +6,253 @@ import aiohttp
 from datetime import datetime, timedelta
 
 # --- Configuration ---
-st.set_page_config(page_title="CoinDCX Futures Ultra-Fast", layout="wide")
-st.markdown("""<style>#MainMenu {visibility: hidden;} footer {visibility: hidden;} header {visibility: hidden;}</style>""", unsafe_allow_html=True)
+st.set_page_config(page_title="CoinDCX Futures 15m Tracker", layout="wide")
+
+# Hide standard menus
+st.markdown("""
+<style>
+#MainMenu {visibility: hidden;}
+footer {visibility: hidden;}
+header {visibility: hidden;}
+</style>
+""", unsafe_allow_html=True)
 
 # --- Session State ---
-if 'crypto_data' not in st.session_state: st.session_state.crypto_data = None
-if 'last_update' not in st.session_state: st.session_state.last_update = None
+if 'crypto_data' not in st.session_state:
+    st.session_state.crypto_data = None
+if 'last_fetch_time' not in st.session_state:
+    st.session_state.last_fetch_time = None
+if 'total_symbols_count' not in st.session_state:
+    st.session_state.total_symbols_count = 0
+if 'missing_symbols' not in st.session_state:
+    st.session_state.missing_symbols = []
 
-# --- 1. Get CoinDCX List ---
-async def get_coindcx_symbols():
+# --- 1. Dynamic Symbol Fetching (CoinDCX) ---
+async def get_coindcx_futures_symbols():
     url = "https://api.coindcx.com/exchange/v1/derivatives/futures/data/active_instruments?margin_currency_short_name[]=INR"
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url) as response:
                 if response.status == 200:
                     data = await response.json()
-                    # Clean "B-BTC_USDT" -> "BTC/USDT"
-                    return sorted(list(set([s.replace("B-", "").replace("_", "/") for s in data if s.endswith('USDT')])))
-    except: return []
+                    symbols = []
+                    for s in data:
+                        if isinstance(s, str) and s.endswith('USDT'):
+                            clean = s.replace("B-", "").replace("_", "/")
+                            symbols.append(clean)
+                    return sorted(list(set(symbols)))
+    except Exception:
+        return []
     return []
 
-# --- 2. Ultra-Fast Bulk Fetch ---
-async def fetch_bulk_data():
-    target_symbols = await get_coindcx_symbols()
+# --- 2. Optimized Fetching Logic ---
+
+def calculate_time_aligned_change(ohlcv, interval_hours):
+    if not ohlcv: return -9999
+    ms_per_hour = 3600 * 1000
+    ms_interval = interval_hours * ms_per_hour
+    last_ts = ohlcv[-1][0]
+    current_block_start = last_ts - (last_ts % ms_interval)
+    target_open_ts = current_block_start - ms_interval
+    
+    open_price = None
+    for candle in ohlcv:
+        if candle[0] == target_open_ts:
+            open_price = candle[1]
+            break
+            
+    current_block_index = -1
+    for i, candle in enumerate(ohlcv):
+        if candle[0] == current_block_start:
+            current_block_index = i
+            break
+            
+    if open_price is not None and current_block_index > 0:
+        close_price = ohlcv[current_block_index - 1][4]
+        return ((close_price - open_price) / open_price) * 100
+    return -9999
+
+async def fetch_ohlcv_direct(exchange, symbol, source_name):
+    """Fetch directly from the known valid exchange"""
+    try:
+        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe='15m', limit=100)
+        if not ohlcv or len(ohlcv) < 2: return None
+
+        last_closed_candle = ohlcv[-2]
+        current_price = last_closed_candle[4]
+        open_15m = last_closed_candle[1]
+        
+        return {
+            "Symbol": symbol,
+            "Price": current_price,
+            "Source": source_name,
+            "15m": ((current_price - open_15m) / open_15m) * 100,
+            "1h": calculate_time_aligned_change(ohlcv, 1),
+            "4h": calculate_time_aligned_change(ohlcv, 4),
+            "24h": calculate_time_aligned_change(ohlcv, 24),
+        }
+    except Exception:
+        return None
+
+async def safe_load_markets(exchange, name):
+    """Safely load markets. If blocked (451), return False so we don't crash."""
+    try:
+        await exchange.load_markets()
+        return True
+    except Exception as e:
+        # If it's a 451 error (Geo-block) or timeout, we just skip this exchange
+        print(f"Skipping {name} due to error: {e}") 
+        return False
+
+async def get_all_data():
+    # 1. Get Target List
+    target_symbols = await get_coindcx_futures_symbols()
+    st.session_state.total_symbols_count = len(target_symbols)
     if not target_symbols: return []
 
-    # Initialize Exchanges
-    # We use 'enableRateLimit': False because we are making only ~1 call per exchange!
-    ex_binance = ccxt.binance({'options': {'defaultType': 'swap'}}) # USDT-M Futures
-    ex_bybit = ccxt.bybit({'options': {'defaultType': 'swap'}})
-    ex_mexc = ccxt.mexc({'options': {'defaultType': 'swap'}})
+    # 2. Init Exchanges
+    all_exchanges = {
+        'BinanceUS': ccxt.binanceus({'enableRateLimit': True}),
+        'Binance': ccxt.binance({'enableRateLimit': True}),
+        'Bybit': ccxt.bybit({'enableRateLimit': True}),
+        'MEXC': ccxt.mexc({'enableRateLimit': True})
+    }
 
-    final_data = {} # { 'BTC/USDT': { '15m': ..., 'Price': ... } }
+    active_exchanges = {}
 
     try:
-        # --- A. BINANCE (The Heavy Lifter) ---
-        # We fetch 4 different "Windows" of data for ALL coins in parallel
-        # This is 4 API calls TOTAL.
+        # 3. SAFE MAPPING: Load markets individually and check for blocks
+        # We run this in parallel but catch errors for each one
+        tasks = [safe_load_markets(ex, name) for name, ex in all_exchanges.items()]
+        results = await asyncio.gather(*tasks)
+
+        # Only keep exchanges that successfully loaded
+        for (name, ex), success in zip(all_exchanges.items(), results):
+            if success:
+                active_exchanges[name] = ex
+            else:
+                # Close the failed connection immediately
+                await ex.close()
+
+        if not active_exchanges:
+            st.error("All exchanges failed to connect. Check internet or API status.")
+            return []
+
+        # 4. Build Map using only ACTIVE exchanges
+        valid_map = {} 
+        # Priority: BinanceUS -> Binance -> Bybit -> MEXC
+        priority_order = [name for name in ['BinanceUS', 'Binance', 'Bybit', 'MEXC'] if name in active_exchanges]
         
-        async def fetch_binance_window(window_size):
-            # params={"windowSize": "15m"} asks Binance for 15m stats for ALL coins
-            return await ex_binance.fetch_tickers(params={"windowSize": window_size})
-
-        tasks = [
-            fetch_binance_window("15m"),
-            fetch_binance_window("1h"),
-            fetch_binance_window("4h"),
-            ex_binance.fetch_tickers() # Standard 24h
-        ]
+        for symbol in target_symbols:
+            for name in priority_order:
+                ex = active_exchanges[name]
+                if symbol in ex.markets:
+                    valid_map[symbol] = (name, ex)
+                    break 
         
-        # Run all 4 Binance calls at once
-        b_15m, b_1h, b_4h, b_24h = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Process Binance Data
-        if isinstance(b_24h, dict):
-            for symbol, ticker in b_24h.items():
-                if symbol not in final_data: final_data[symbol] = {}
-                final_data[symbol]['Price'] = ticker.get('last')
-                final_data[symbol]['24h'] = ticker.get('percentage')
-                final_data[symbol]['Source'] = 'Binance'
-
-        # Helper to inject window stats
-        def inject_window(dataset, key_name):
-            if isinstance(dataset, dict):
-                for symbol, ticker in dataset.items():
-                    if symbol in final_data:
-                        # Binance returns "priceChangePercent" which is the % change
-                        final_data[symbol][key_name] = ticker.get('percentage')
-
-        inject_window(b_15m, '15m')
-        inject_window(b_1h, '1h')
-        inject_window(b_4h, '4h')
-
-        # --- B. BYBIT & MEXC (Fill in the gaps) ---
-        # Only fetch standard 24h ticker for these, as they don't support clean bulk "15m" windows
+        # 5. Fetch Data
+        batch_size = 50 
+        all_results = []
         
-        # Identify what's missing
-        missing_symbols = [s for s in target_symbols if s not in final_data]
-        
-        if missing_symbols:
-            # Fetch ALL Bybit tickers in 1 call
-            try:
-                bybit_tickers = await ex_bybit.fetch_tickers()
-                for symbol in missing_symbols:
-                    if symbol in bybit_tickers:
-                        t = bybit_tickers[symbol]
-                        final_data[symbol] = {
-                            'Price': t.get('last'),
-                            '24h': t.get('percentage'),
-                            'Source': 'Bybit'
-                            # 15m/1h/4h will be None (N/A)
-                        }
-            except: pass
+        found_keys = valid_map.keys()
+        st.session_state.missing_symbols = [s for s in target_symbols if s not in found_keys]
 
-        # Re-check missing
-        missing_symbols = [s for s in target_symbols if s not in final_data]
+        tasks = []
+        for symbol, (name, ex) in valid_map.items():
+            tasks.append(fetch_ohlcv_direct(ex, symbol, name))
+
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        total_tasks = len(tasks)
         
-        if missing_symbols:
-            # Fetch ALL MEXC tickers in 1 call
-            try:
-                mexc_tickers = await ex_mexc.fetch_tickers()
-                for symbol in missing_symbols:
-                    if symbol in mexc_tickers:
-                        t = mexc_tickers[symbol]
-                        final_data[symbol] = {
-                            'Price': t.get('last'),
-                            '24h': t.get('percentage'),
-                            'Source': 'MEXC'
-                        }
-            except: pass
+        if total_tasks > 0:
+            for i in range(0, total_tasks, batch_size):
+                batch = tasks[i:i+batch_size]
+                status_text.text(f"Fetching batch {i//batch_size + 1}...")
+                results = await asyncio.gather(*batch)
+                all_results.extend([r for r in results if r is not None])
+                
+                progress_bar.progress(min((i + batch_size) / total_tasks, 1.0))
+                await asyncio.sleep(0.5)
+
+        progress_bar.empty()
+        status_text.empty()
+        return all_results
 
     except Exception as e:
-        st.error(f"Bulk Fetch Error: {e}")
+        st.error(f"Error: {e}")
+        return []
     finally:
-        await ex_binance.close()
-        await ex_bybit.close()
-        await ex_mexc.close()
+        # Close all active exchange connections
+        for ex in active_exchanges.values():
+            await ex.close()
 
-    # --- C. Filter & Format ---
-    # We gathered data for ALL Binance coins (thousands). 
-    # Now we filter down to ONLY the 400 CoinDCX coins.
-    
-    clean_results = []
-    for sym in target_symbols:
-        if sym in final_data:
-            d = final_data[sym]
-            clean_results.append({
-                "Symbol": sym,
-                "Price": d.get('Price'),
-                "15m": d.get('15m'),
-                "1h": d.get('1h'),
-                "4h": d.get('4h'),
-                "24h": d.get('24h'),
-                "Source": d.get('Source')
-            })
-    
-    return clean_results
+# --- 3. UI & Logic ---
 
-# --- 3. UI & Scheduler ---
-
-st.title("⚡ CoinDCX Speed Tracker (Bulk Mode)")
+st.title("🌐 CoinDCX Futures (Optimized)")
 
 @st.fragment(run_every=60)
-def ui_fragment():
+def auto_scheduler():
     now = datetime.now()
+    current_minute = now.minute
     
-    # Refresh Logic
     col1, col2 = st.columns([3, 1])
     with col1:
-        st.caption(f"Last Update: {st.session_state.last_update} | Mode: Ultra-Fast (Bulk API)")
+        minutes_to_next = 15 - (current_minute % 15)
+        next_run = (now + timedelta(minutes=minutes_to_next)).strftime('%H:%M')
+        st.caption(f"🕒 Time: {now.strftime('%H:%M')} | Next: {next_run}")
     with col2:
-        if st.button("🔄 Force Refresh"):
-            st.session_state.crypto_data = None
+        if st.button("🔄 Refresh", use_container_width=True):
+            st.session_state.last_fetch_time = None
             st.rerun()
 
-    # Auto-Fetch Trigger (Every 15m or First Load)
     should_fetch = False
-    if st.session_state.crypto_data is None: should_fetch = True
-    elif now.minute % 15 == 0:
-        # Simple debounce: Don't fetch if we just fetched in this same minute
-        last = st.session_state.last_update
-        if not last or last.split(":")[1] != str(now.minute):
+    if st.session_state.crypto_data is None:
+        should_fetch = True
+    elif current_minute % 15 == 0:
+        last = st.session_state.last_fetch_time
+        if last is None or last.minute != current_minute:
             should_fetch = True
 
     if should_fetch:
-        with st.spinner("🚀 Bulk fetching 15m/1h/4h stats for ALL coins..."):
-            data = asyncio.run(fetch_bulk_data())
-            if data:
-                st.session_state.crypto_data = data
-                st.session_state.last_update = now.strftime("%H:%M")
+        with st.spinner("🚀 Connecting to exchanges (Skipping blocked ones)..."):
+            new_data = asyncio.run(get_all_data())
+            if new_data:
+                st.session_state.crypto_data = new_data
+                st.session_state.last_fetch_time = now
 
-    # Display Table
     if st.session_state.crypto_data:
         df = pd.DataFrame(st.session_state.crypto_data)
         
-        # Metrics
-        found = len(df)
-        total = 408 # Approx
-        missing = total - found
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Total List", st.session_state.total_symbols_count)
+        m2.metric("Fetched", len(df))
+        m3.metric("Missing", len(st.session_state.missing_symbols), delta_color="inverse")
         
-        m1, m2 = st.columns(2)
-        m1.metric("Tracked Pairs", found)
-        m2.metric("Missing/Offline", missing, delta_color="inverse")
+        if st.session_state.missing_symbols:
+            with st.expander("Show Missing Symbols"):
+                st.write(", ".join(st.session_state.missing_symbols))
         
         st.divider()
-        
-        # Formatting
+
         df = df.sort_values(by="15m", ascending=False)
         df.reset_index(drop=True, inplace=True)
         df.index += 1
         df.index.name = "Sr"
 
-        def fmt_pct(v): return "N/A" if pd.isna(v) or v is None else f"{v:.2f}%"
-        def fmt_prc(v): return "N/A" if pd.isna(v) or v is None else (f"${v:.6f}" if v < 0.1 else f"${v:.2f}")
+        def fmt_pct(v): return "N/A" if v == -9999 or v is None else f"{v:.2f}%"
+        def fmt_prc(v): return "N/A" if v is None else (f"${v:.6f}" if v < 0.1 else f"${v:.2f}")
         def color(v): 
-            if pd.isna(v) or v is None: return ""
+            if v == -9999 or v is None: return ""
             return f'color: {"#4CAF50" if v > 0 else "#FF5252"}; font-weight: bold;'
 
         st.dataframe(
-            df.style.map(color, subset=['15m', '1h', '4h', '24h'])
-                .format({"Price": fmt_prc, "15m": fmt_pct, "1h": fmt_pct, "4h": fmt_pct, "24h": fmt_pct}),
+            df.style.map(color, subset=['15m', '1h', '4h', '24h']).format({
+                "Price": fmt_prc, "15m": fmt_pct, "1h": fmt_pct, "4h": fmt_pct, "24h": fmt_pct
+            }),
             use_container_width=True, height=800, on_select="ignore"
         )
+    else:
+        st.info("Waiting for scheduled fetch...")
 
-ui_fragment()
+auto_scheduler()
