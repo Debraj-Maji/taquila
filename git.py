@@ -57,7 +57,8 @@ def calculate_time_aligned_change(ohlcv, interval_hours):
 
 async def fetch_single_pair(exchange, symbol, original_name):
     try:
-        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe='15m', limit=110)
+        # Reduced candle limit slightly to speed it up
+        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe='15m', limit=100)
         if len(ohlcv) < 2: return None
         
         last_closed_candle = ohlcv[-2]
@@ -80,38 +81,58 @@ async def fetch_single_pair(exchange, symbol, original_name):
         return None
 
 async def get_crypto_data():
-    exchange = ccxt.bitget({'options': {'defaultType': 'swap'}, 'enableRateLimit': True})
-    tasks = [fetch_single_pair(exchange, sym, raw) for sym, raw in zip(CLEANED_SYMBOLS, RAW_SYMBOLS)]
-    results = await asyncio.gather(*tasks)
-    await exchange.close()
-    return [r for r in results if r is not None]
+    try:
+        # ENABLE RATE LIMIT IS CRITICAL HERE
+        exchange = ccxt.bitget({'options': {'defaultType': 'swap'}, 'enableRateLimit': True})
+        
+        # We process in batches to avoid crushing the CPU/Network
+        batch_size = 50
+        all_results = []
+        
+        for i in range(0, len(CLEANED_SYMBOLS), batch_size):
+            batch_raw = RAW_SYMBOLS[i:i+batch_size]
+            batch_clean = CLEANED_SYMBOLS[i:i+batch_size]
+            
+            tasks = [fetch_single_pair(exchange, sym, raw) for sym, raw in zip(batch_clean, batch_raw)]
+            batch_results = await asyncio.gather(*tasks)
+            all_results.extend(batch_results)
+            
+            # Small pause between batches to be nice to the API
+            await asyncio.sleep(0.5)
 
-# --- Display Logic (The NO BLUR Fix) ---
+        await exchange.close()
+        return [r for r in all_results if r is not None]
+    except Exception as e:
+        return []
+
+# --- Display Logic ---
 
 st.title("🚀 Crypto Futures Tracker")
-st.caption("Live Bitget Data | Aligned to Clock Time | Updates every 10s")
+st.caption("Live Bitget Data | Aligned to Clock Time | Updates every 30s")
 
-# NOTE: This @st.fragment decorator is what stops the page from reloading/greying out.
-# It only refreshes the table inside this function.
-@st.fragment(run_every=10)
+# Use a container so we can show a loading message
+data_container = st.container()
+
+@st.fragment(run_every=30)
 def show_live_data():
-    # We create a new event loop for every update to avoid thread conflicts
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    try:
-        data = loop.run_until_complete(get_crypto_data())
-    except Exception as e:
-        st.error(f"Error fetching data: {e}")
-        return
-    finally:
-        loop.close()
+    with st.spinner("Fetching data for 200+ coins... this takes a moment..."):
+        try:
+            # Safer way to run async in Streamlit
+            data = asyncio.run(get_crypto_data())
+        except Exception as e:
+            st.error(f"System Error: {e}")
+            return
 
     if not data:
-        st.warning("Fetching initial data...")
+        st.warning("⚠️ No data received. The server might be throttling requests. Waiting for next cycle...")
         return
 
     df = pd.DataFrame(data)
+    
+    if df.empty:
+         st.warning("Dataframe is empty.")
+         return
+
     df = df.sort_values(by="15m", ascending=False)
     df.reset_index(drop=True, inplace=True)
     df.index += 1
