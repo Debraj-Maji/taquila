@@ -2,17 +2,29 @@ import streamlit as st
 import asyncio
 import ccxt.async_support as ccxt
 import pandas as pd
+import time
 from datetime import datetime
 
-# --- Configuration ---
+# --- 1. Configuration ---
 st.set_page_config(page_title="Crypto Tracker", layout="wide")
 
-# Hide standard Streamlit menu for a cleaner look
+# --- SOLUTION 2: THE CSS HACK ---
+# This CSS forces the app to stay 100% visible (opacity 1) during the refresh
 st.markdown("""
 <style>
-#MainMenu {visibility: hidden;}
-footer {visibility: hidden;}
-header {visibility: hidden;}
+    /* Hide standard menu */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+
+    /* Force the main container to stay visible during processing */
+    .stApp {
+        opacity: 1 !important;
+    }
+    /* Remove the transition effect that causes the fade */
+    .stApp > header, .stApp > div {
+        transition: none !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -25,7 +37,7 @@ def clean_symbol(s):
 
 CLEANED_SYMBOLS = [clean_symbol(s) for s in RAW_SYMBOLS]
 
-# --- Calculation Logic ---
+# --- 2. Logic ---
 
 def calculate_time_aligned_change(ohlcv, interval_hours):
     if not ohlcv: return -9999
@@ -86,46 +98,63 @@ async def get_crypto_data():
     await exchange.close()
     return [r for r in results if r is not None]
 
-# --- Display Logic (Independent Fragment) ---
+# --- 3. Display Loop ---
 
 st.title("🚀 Crypto Futures Tracker")
-st.caption("Live Bitget Data | Aligned to Clock Time | Updates every 10s")
 
-# This decorator updates ONLY this function, preventing the whole page from "blinking"
-@st.fragment(run_every=10)
-def show_live_data():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    try:
-        data = loop.run_until_complete(get_crypto_data())
-    except Exception as e:
-        st.error(f"Error: {e}")
-        return
-    finally:
-        loop.close()
+# Controls
+col1, col2 = st.columns([3, 1])
+with col1:
+    st.caption("Live Bitget Data | Aligned to Clock Time | Updates every 10s")
+with col2:
+    if st.button("Refresh Now"):
+        st.rerun()
 
-    if not data:
-        st.warning("Fetching data...")
-        return
+# Placeholder for the table
+table_placeholder = st.empty()
 
-    df = pd.DataFrame(data)
-    df = df.sort_values(by="15m", ascending=False)
-    df.reset_index(drop=True, inplace=True)
-    df.index += 1
-    df.index.name = "Sr"
+async def run_app():
+    # We use a placeholder so the whole page doesn't reload, just the table
+    with table_placeholder.container():
+        st.info("Fetching latest data from Bitget... Please wait.")
+        
+        data = await get_crypto_data()
+        
+        if not data:
+            st.error("Failed to fetch data. Retrying...")
+            return
 
-    def color_map(val):
-        if val is None: return ""
-        color = '#4CAF50' if val > 0 else '#FF5252'
-        return f'color: {color}; font-weight: bold;'
+        df = pd.DataFrame(data)
+        
+        # Sort by 15m by default, descending
+        df = df.sort_values(by="15m", ascending=False)
+        
+        # Reset Index to create a "Sr" column
+        df.reset_index(drop=True, inplace=True)
+        df.index += 1
+        df.index.name = "Sr"
 
-    st.dataframe(
-        df.style.map(color_map, subset=['15m', '1h', '4h', '24h'])
-            .format({"Price": "${:.4f}", "15m": "{:.2f}%", "1h": "{:.2f}%", "4h": "{:.2f}%", "24h": "{:.2f}%"}),
-        use_container_width=True,
-        height=800
-    )
-    st.caption(f"Last Updated: {datetime.now().strftime('%H:%M:%S')}")
+        # Styling Logic for Colors
+        def color_map(val):
+            if val is None: return ""
+            color = '#4CAF50' if val > 0 else '#FF5252' # Green / Red
+            return f'color: {color}; font-weight: bold;'
 
-show_live_data()
+        # Apply styles
+        st.dataframe(
+            df.style.applymap(color_map, subset=['15m', '1h', '4h', '24h'])
+                    .format({"Price": "${:.4f}", "15m": "{:.2f}%", "1h": "{:.2f}%", "4h": "{:.2f}%", "24h": "{:.2f}%"}),
+            use_container_width=True,
+            height=800  # Adjust height as needed
+        )
+        
+        st.caption(f"Last Updated: {datetime.now().strftime('%H:%M:%S')}")
+
+# Run the async function
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+loop.run_until_complete(run_app())
+
+# Auto-refresh using Streamlit's rerun capability
+time.sleep(10)
+st.rerun()
