@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timedelta
 
 # --- Configuration ---
-st.set_page_config(page_title="CoinDCX Futures (Bitget Data)", layout="wide")
+st.set_page_config(page_title="CoinDCX Futures Tracker", layout="wide")
 
 # Hide standard menus
 st.markdown("""
@@ -29,8 +29,8 @@ if 'missing_symbols' not in st.session_state:
     st.session_state.missing_symbols = []
 if 'fetch_logs' not in st.session_state:
     st.session_state.fetch_logs = []
-if 'market_map' not in st.session_state: # Cache for Exchange Markets
-    st.session_state.market_map = None
+if 'market_map' not in st.session_state:
+    st.session_state.market_map = None # Format: {'BTC/USDT': 'Bitget', ...}
 
 # --- 1. Dynamic Symbol Fetching (CoinDCX) ---
 async def get_coindcx_futures_symbols():
@@ -50,7 +50,7 @@ async def get_coindcx_futures_symbols():
         return []
     return []
 
-# --- 2. Bitget Fetching Logic ---
+# --- 2. Calculation Logic ---
 
 def calculate_time_aligned_change(ohlcv, interval_hours):
     if not ohlcv: return -9999
@@ -78,10 +78,37 @@ def calculate_time_aligned_change(ohlcv, interval_hours):
         return ((close_price - open_price) / open_price) * 100
     return -9999
 
-async def fetch_ohlcv_bitget(exchange, symbol):
+def calculate_day_change(ohlcv):
+    """
+    Calculates change from TODAY 00:00 UTC to Last Completed Candle Close.
+    """
+    if not ohlcv or len(ohlcv) < 2: return -9999
+    
+    # Use the timestamp of the last candle to determine "Today"
+    last_ts = ohlcv[-1][0] 
+    ms_per_day = 86400000 
+    start_of_day_ts = last_ts - (last_ts % ms_per_day)
+    
+    # Find the Open Price at 00:00 UTC
+    day_open_price = None
+    for candle in ohlcv:
+        if candle[0] == start_of_day_ts:
+            day_open_price = candle[1] # Open price of the 00:00 candle
+            break
+            
+    # Use the Close price of the last COMPLETED candle
+    last_completed_candle = ohlcv[-2]
+    last_completed_close = last_completed_candle[4]
+    
+    if day_open_price is not None and day_open_price > 0:
+        return ((last_completed_close - day_open_price) / day_open_price) * 100
+        
+    return -9999
+
+async def fetch_ohlcv_direct(exchange, symbol, source_name):
     try:
-        # Fetch 110 candles
-        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe='15m', limit=110)
+        # INCREASED LIMIT TO 200 to ensure we find 00:00 UTC
+        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe='15m', limit=200)
         
         if not ohlcv or len(ohlcv) < 2: return None
 
@@ -92,89 +119,119 @@ async def fetch_ohlcv_bitget(exchange, symbol):
         return {
             "Symbol": symbol,
             "Price": current_price,
-            "Source": "Bitget",
+            "Source": source_name,
             "15m": ((current_price - open_15m) / open_15m) * 100,
             "1h": calculate_time_aligned_change(ohlcv, 1),
             "4h": calculate_time_aligned_change(ohlcv, 4),
-            "24h": calculate_time_aligned_change(ohlcv, 24),
+            "24h": calculate_day_change(ohlcv),
         }
     except Exception:
         return None
 
+async def safe_load_markets(exchange, name):
+    try:
+        await exchange.load_markets()
+        return True
+    except Exception:
+        return False
+
 async def get_all_data():
     logs = []
     
-    # 1. Get List
+    # 1. Get CoinDCX List
     t_start = time.time()
     target_symbols = await get_coindcx_futures_symbols()
-    t_end = time.time()
-    logs.append(f"Fetched CoinDCX List: {len(target_symbols)} symbols in {t_end - t_start:.2f}s")
-    
+    logs.append(f"Fetched CoinDCX List: {len(target_symbols)} symbols")
     st.session_state.total_symbols_count = len(target_symbols)
     if not target_symbols: return []
 
-    # 2. Init Bitget
-    exchange = ccxt.bitget({
-        'options': {'defaultType': 'swap'}, 
-        'enableRateLimit': True
-    })
+    # 2. Initialize Exchanges
+    # Priority: Bitget -> BinanceUS -> MEXC
+    all_exchanges = {
+        'Bitget': ccxt.bitget({'options': {'defaultType': 'swap'}, 'enableRateLimit': True}),
+        'BinanceUS': ccxt.binanceus({'enableRateLimit': True}),
+        'MEXC': ccxt.mexc({'enableRateLimit': True})
+    }
+    
+    active_exchanges = {}
 
     try:
-        # 3. Load Markets (CACHED)
-        # We only load this if we haven't done it this session to save time
+        # 3. Load Markets & Map Symbols
+        # Only re-map if we don't have a cached map OR if user refreshed manually
         if st.session_state.market_map is None:
-            t_start = time.time()
-            try:
-                await exchange.load_markets()
-                # Save just the keys (symbol names) to session state to save RAM
-                st.session_state.market_map = list(exchange.markets.keys()) 
-                logs.append(f"Loaded & Cached Bitget Markets in {time.time() - t_start:.2f}s")
-            except Exception as e:
-                st.error(f"Bitget Connection Error: {e}")
-                await exchange.close()
-                return []
-        else:
-            # Inject the cached markets back into the exchange object manually
-            # (This is a CCXT trick to avoid re-fetching)
-            exchange.markets = {s: {} for s in st.session_state.market_map}
-            logs.append("Used Cached Market List (Saved API Call)")
+            t_map_start = time.time()
+            
+            # Load all markets concurrently
+            tasks = [safe_load_markets(ex, name) for name, ex in all_exchanges.items()]
+            results = await asyncio.gather(*tasks)
 
-        # 4. Filter Valid Symbols
-        # We compare CoinDCX list vs Bitget List
-        valid_symbols = []
-        for sym in target_symbols:
-            if sym in st.session_state.market_map:
-                valid_symbols.append(sym)
-        
+            for (name, ex), success in zip(all_exchanges.items(), results):
+                if success:
+                    active_exchanges[name] = ex
+                else:
+                    await ex.close()
+
+            # Build the Map
+            # Logic: For every CoinDCX symbol, find which exchange has it.
+            # Priority: Bitget > BinanceUS > MEXC
+            market_map = {} 
+            valid_symbols = []
+            
+            priority_order = [n for n in ['Bitget', 'BinanceUS', 'MEXC'] if n in active_exchanges]
+            
+            for sym in target_symbols:
+                for name in priority_order:
+                    ex = active_exchanges[name]
+                    if sym in ex.markets:
+                        market_map[sym] = name # Save "SOL/USDT" -> "Bitget"
+                        valid_symbols.append(sym)
+                        break
+            
+            st.session_state.market_map = market_map # Cache it
+            logs.append(f"Mapped {len(market_map)} symbols in {time.time() - t_map_start:.2f}s")
+            
+        else:
+            # Restore connections for cached map
+            # We need to reload markets because CCXT objects are closed/recreated
+            tasks = [safe_load_markets(ex, name) for name, ex in all_exchanges.items()]
+            await asyncio.gather(*tasks)
+            active_exchanges = all_exchanges # Assume they work if they worked before
+            market_map = st.session_state.market_map
+            valid_symbols = list(market_map.keys())
+            logs.append("Used Cached Exchange Map")
+
+        # Identify missing
         st.session_state.missing_symbols = [s for s in target_symbols if s not in valid_symbols]
-        
-        # 5. Fetch Data
-        # We assume 95% of symbols are valid, so we just iterate the valid list
+
+        # 4. Fetch Data
+        # Group symbols by exchange to optimize connection usage
+        # But for simple asyncio.gather, a flat list of tasks is fine
         batch_size = 50 
         all_results = []
         
+        # Prepare Tasks
+        tasks = []
+        for sym in valid_symbols:
+            exchange_name = market_map[sym]
+            if exchange_name in active_exchanges:
+                ex_obj = active_exchanges[exchange_name]
+                tasks.append(fetch_ohlcv_direct(ex_obj, sym, exchange_name))
+
+        # Run Batches
         progress_bar = st.progress(0)
         status_text = st.empty()
-        total_valid = len(valid_symbols)
+        total_tasks = len(tasks)
         
-        if total_valid > 0:
-            for i in range(0, total_valid, batch_size):
+        if total_tasks > 0:
+            for i in range(0, total_tasks, batch_size):
                 b_start = time.time()
+                batch = tasks[i:i+batch_size]
                 
-                batch = valid_symbols[i:i+batch_size]
-                batch_num = i//batch_size + 1
-                status_text.text(f"Fetching batch {batch_num}...")
-                
-                tasks = [fetch_ohlcv_bitget(exchange, sym) for sym in batch]
-                results = await asyncio.gather(*tasks)
+                results = await asyncio.gather(*batch)
                 all_results.extend([r for r in results if r is not None])
                 
-                b_end = time.time()
-                logs.append(f"Batch {batch_num}: {b_end - b_start:.2f}s")
-                
-                progress_bar.progress(min((i + batch_size) / total_valid, 1.0))
-                
-                # Sleep is critical for Bitget to avoid "429 Too Many Requests"
+                logs.append(f"Batch {i//batch_size + 1}: {time.time() - b_start:.2f}s")
+                progress_bar.progress(min((i + batch_size) / total_tasks, 1.0))
                 await asyncio.sleep(0.5)
 
         progress_bar.empty()
@@ -187,11 +244,12 @@ async def get_all_data():
         st.error(f"Error: {e}")
         return []
     finally:
-        await exchange.close()
+        for ex in all_exchanges.values():
+            await ex.close()
 
 # --- 3. UI & Logic ---
 
-st.title("🌐 CoinDCX Futures (Bitget Source)")
+st.title("🌐 CoinDCX Futures Tracker")
 
 @st.fragment(run_every=60)
 def auto_scheduler():
@@ -204,30 +262,26 @@ def auto_scheduler():
         next_run = (now + timedelta(minutes=minutes_to_next)).strftime('%H:%M')
         st.caption(f"🕒 Time: {now.strftime('%H:%M')} | Next: {next_run}")
     with col2:
-        # FIXED REFRESH BUTTON
         if st.button("🔄 Refresh", use_container_width=True):
-            # 1. Clear data to force a re-fetch logic
-            st.session_state.crypto_data = None 
-            # 2. Reset last time so it doesn't think it already ran
-            st.session_state.last_fetch_time = None 
-            # 3. Rerun to restart the script from top
-            st.rerun()
+            st.session_state.crypto_data = None # Clear Data
+            st.session_state.last_fetch_time = None # Clear Timer
+            st.rerun() # Force Restart
 
     # LOGIC: Should we fetch?
     should_fetch = False
     
-    # Condition 1: No data exists (First run or Refresh pressed)
+    # 1. IMMEDIATE: If no data exists (e.g., just started or Refresh clicked)
     if st.session_state.crypto_data is None:
         should_fetch = True
         
-    # Condition 2: It is 00, 15, 30, 45 AND we haven't run this minute
+    # 2. SCHEDULED: If it's a 15m interval
     elif current_minute % 15 == 0:
         last = st.session_state.last_fetch_time
         if last is None or last.minute != current_minute:
             should_fetch = True
 
     if should_fetch:
-        with st.spinner("🚀 Fetching Bitget Data..."):
+        with st.spinner("🚀 Fetching Data from Bitget, BinanceUS, MEXC..."):
             new_data = asyncio.run(get_all_data())
             if new_data:
                 st.session_state.crypto_data = new_data
@@ -268,6 +322,7 @@ def auto_scheduler():
             use_container_width=True, height=800, on_select="ignore"
         )
     else:
-        st.info("Waiting for scheduled fetch...")
+        # This will only show if data is None and we failed to fetch
+        st.info("Initializing...")
 
 auto_scheduler()
