@@ -3,6 +3,7 @@ import asyncio
 import ccxt.async_support as ccxt
 import pandas as pd
 import aiohttp
+import time  # Added time module
 from datetime import datetime, timedelta
 
 # --- Configuration ---
@@ -26,6 +27,8 @@ if 'total_symbols_count' not in st.session_state:
     st.session_state.total_symbols_count = 0
 if 'missing_symbols' not in st.session_state:
     st.session_state.missing_symbols = []
+if 'fetch_logs' not in st.session_state: # New state for logs
+    st.session_state.fetch_logs = []
 
 # --- 1. Dynamic Symbol Fetching (CoinDCX) ---
 async def get_coindcx_futures_symbols():
@@ -48,7 +51,6 @@ async def get_coindcx_futures_symbols():
 # --- 2. Optimized Fetching Logic ---
 
 def calculate_time_aligned_change(ohlcv, interval_hours):
-    """Calculates change based on aligned clock blocks (1h, 4h)"""
     if not ohlcv: return -9999
     ms_per_hour = 3600 * 1000
     ms_interval = interval_hours * ms_per_hour
@@ -74,13 +76,10 @@ def calculate_time_aligned_change(ohlcv, interval_hours):
     return -9999
 
 def calculate_day_change(ohlcv):
-    """
-    Calculates change from TODAY 00:00 UTC to Last Completed Candle Close.
-    """
     if not ohlcv or len(ohlcv) < 2: return -9999
     
     last_ts = ohlcv[-1][0] 
-    ms_per_day = 86400000 # 24 * 60 * 60 * 1000
+    ms_per_day = 86400000 
     start_of_day_ts = last_ts - (last_ts % ms_per_day)
     
     day_open_price = None
@@ -102,9 +101,7 @@ def calculate_day_change(ohlcv):
     return -9999
 
 async def fetch_ohlcv_direct(exchange, symbol, source_name):
-    """Fetch directly from the known valid exchange"""
     try:
-        # Fetch 100 candles (Enough for 24h calculation)
         ohlcv = await exchange.fetch_ohlcv(symbol, timeframe='15m', limit=100)
         if not ohlcv or len(ohlcv) < 2: return None
 
@@ -119,7 +116,7 @@ async def fetch_ohlcv_direct(exchange, symbol, source_name):
             "15m": ((current_price - open_15m) / open_15m) * 100,
             "1h": calculate_time_aligned_change(ohlcv, 1),
             "4h": calculate_time_aligned_change(ohlcv, 4),
-            "24h": calculate_day_change(ohlcv), # <--- UPDATED LOGIC HERE
+            "24h": calculate_day_change(ohlcv),
         }
     except Exception:
         return None
@@ -132,8 +129,14 @@ async def safe_load_markets(exchange, name):
         return False
 
 async def get_all_data():
-    # 1. Get Target List from CoinDCX
+    logs = [] # Local log collector
+    
+    # 1. Get Target List
+    t_start = time.time()
     target_symbols = await get_coindcx_futures_symbols()
+    t_end = time.time()
+    logs.append(f"Fetched CoinDCX List: {len(target_symbols)} symbols in {t_end - t_start:.2f}s")
+    
     st.session_state.total_symbols_count = len(target_symbols)
     if not target_symbols: return []
 
@@ -147,8 +150,11 @@ async def get_all_data():
 
     try:
         # 3. Load Markets
+        t_start = time.time()
         tasks = [safe_load_markets(ex, name) for name, ex in all_exchanges.items()]
         results = await asyncio.gather(*tasks)
+        t_end = time.time()
+        logs.append(f"Loaded Exchange Markets in {t_end - t_start:.2f}s")
 
         for (name, ex), success in zip(all_exchanges.items(), results):
             if success:
@@ -160,11 +166,9 @@ async def get_all_data():
             st.error("Could not connect to BinanceUS or MEXC.")
             return []
 
-        # 4. Map Symbols (Priority: BinanceUS -> MEXC)
+        # 4. Map Symbols
         valid_map = {} 
-        priority_order = ['BinanceUS', 'MEXC'] # Check BinanceUS first, then MEXC
-        
-        # Only check available exchanges
+        priority_order = ['BinanceUS', 'MEXC']
         final_priority = [p for p in priority_order if p in active_exchanges]
 
         for symbol in target_symbols:
@@ -175,7 +179,6 @@ async def get_all_data():
                     break 
         
         # 5. Fetch Data
-        # MEXC allows many requests, so we can use a larger batch size
         batch_size = 100 
         all_results = []
         
@@ -192,16 +195,26 @@ async def get_all_data():
         
         if total_tasks > 0:
             for i in range(0, total_tasks, batch_size):
+                b_start = time.time() # Batch Start Time
+                
                 batch = tasks[i:i+batch_size]
-                status_text.text(f"Fetching batch {i//batch_size + 1}...")
+                batch_num = i//batch_size + 1
+                status_text.text(f"Fetching batch {batch_num}...")
+                
                 results = await asyncio.gather(*batch)
                 all_results.extend([r for r in results if r is not None])
+                
+                b_end = time.time() # Batch End Time
+                logs.append(f"Batch {batch_num} ({len(batch)} items): {b_end - b_start:.2f}s")
                 
                 progress_bar.progress(min((i + batch_size) / total_tasks, 1.0))
                 await asyncio.sleep(0.5)
 
         progress_bar.empty()
         status_text.empty()
+        
+        # Save logs to session state to display later
+        st.session_state.fetch_logs = logs
         return all_results
 
     except Exception as e:
@@ -253,9 +266,20 @@ def auto_scheduler():
         m2.metric("Fetched", len(df))
         m3.metric("Missing", len(st.session_state.missing_symbols), delta_color="inverse")
         
-        if st.session_state.missing_symbols:
-            with st.expander("Show Missing Symbols"):
-                st.write(", ".join(st.session_state.missing_symbols))
+        # --- LOGS SECTION ---
+        with st.expander("⏱️ View Fetch Times & Missing Symbols"):
+            tab1, tab2 = st.tabs(["Missing Symbols", "Performance Logs"])
+            
+            with tab1:
+                if st.session_state.missing_symbols:
+                    st.write(", ".join(st.session_state.missing_symbols))
+                else:
+                    st.success("All symbols found!")
+            
+            with tab2:
+                if st.session_state.fetch_logs:
+                    for log in st.session_state.fetch_logs:
+                        st.text(log)
         
         st.divider()
 
@@ -280,4 +304,3 @@ def auto_scheduler():
         st.info("Waiting for scheduled fetch...")
 
 auto_scheduler()
-
