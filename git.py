@@ -2,10 +2,11 @@ import streamlit as st
 import asyncio
 import ccxt.async_support as ccxt
 import pandas as pd
+import aiohttp
 from datetime import datetime
 
 # --- Configuration ---
-st.set_page_config(page_title="Crypto Tracker", layout="wide")
+st.set_page_config(page_title="CoinDCX Futures Tracker", layout="wide")
 
 # Hide standard menus
 st.markdown("""
@@ -16,16 +17,40 @@ header {visibility: hidden;}
 </style>
 """, unsafe_allow_html=True)
 
-RAW_SYMBOLS = [
-    "B-SAHARA_USDT","B-FLOW_USDT","B-BCH_USDT","B-XRP_USDT","B-LTC_USDT","B-TRX_USDT","B-SANTOS_USDT","B-PUMP_USDT","B-MMT_USDT","B-LINK_USDT","B-XLM_USDT","B-XMR_USDT","B-DASH_USDT","B-ZEC_USDT","B-BNB_USDT","B-SWELL_USDT","B-IOTA_USDT","B-BAT_USDT","B-IOST_USDT","B-PNUT_USDT","B-KNC_USDT","B-ZRX_USDT","B-BAND_USDT","B-HIPPO_USDT","B-RLC_USDT","B-CRV_USDT","B-FARTCOIN_USDT","B-TRB_USDT","B-RUNE_USDT","B-SOL_USDT","B-THE_USDT","B-MORPHO_USDT","B-PYTH_USDT","B-ICX_USDT","B-KAIA_USDT","B-STORJ_USDT","B-ACX_USDT","B-ORCA_USDT","B-UNI_USDT","B-ETC_USDT","B-KOMA_USDT","B-VIRTUAL_USDT","B-SPX_USDT","B-ENJ_USDT","B-AVA_USDT","B-ASTR_USDT","B-1000RATS_USDT","B-ERA_USDT","B-VELODROME_USDT","B-ACE_USDT","B-VANA_USDT","B-PENGU_USDT","B-ADA_USDT","B-AAVE_USDT","B-FIL_USDT","B-IMX_USDT","B-RSR_USDT","B-A2Z_USDT","B-USUAL_USDT","B-AIXBT_USDT","B-KMNO_USDT","B-CGPT_USDT","B-BEL_USDT","B-ATOM_USDT","B-HIVE_USDT","B-ONDO_USDT","B-DEXE_USDT","B-1000PEPE_USDT","B-PHA_USDT","B-WAL_USDT","B-TOWNS_USDT","B-PROVE_USDT","B-GRT_USDT","B-ALGO_USDT","B-1INCH_USDT","B-ZIL_USDT","B-SAND_USDT","B-BNT_USDT","B-RVN_USDT","B-INIT_USDT","B-SFP_USDT","B-BIO_USDT","B-COOKIE_USDT","B-AWE_USDT","B-COTI_USDT","B-API3_USDT","B-SONIC_USDT","B-PORTAL_USDT","B-PROM_USDT","B-S_USDT","B-SOLV_USDT","B-EGLD_USDT","B-MANA_USDT","B-ARC_USDT","B-GMT_USDT","B-AVAAI_USDT","B-RARE_USDT","B-AVAX_USDT","B-TRUMP_USDT","B-KSM_USDT","B-C98_USDT","B-MASK_USDT","B-DYDX_USDT","B-GALA_USDT","B-MELANIA_USDT","B-NEO_USDT","B-ANIME_USDT","B-VINE_USDT","B-SKL_USDT","B-OP_USDT","B-INJ_USDT","B-CHZ_USDT","B-1000LUNC_USDT","B-KITE_USDT","B-FET_USDT","B-FXS_USDT","B-HOT_USDT","B-MINA_USDT","B-PHB_USDT","B-GMX_USDT","B-MITO_USDT","B-PIPPIN_USDT","B-HBAR_USDT","B-CFX_USDT","B-MTL_USDT","B-ACH_USDT","B-SSV_USDT","B-CKB_USDT","B-IOTX_USDT","B-ONG_USDT","B-TRU_USDT","B-OGN_USDT","B-LQTY_USDT","B-ID_USDT","B-BLUR_USDT","B-ETHW_USDT","B-GTC_USDT","B-VVV_USDT","B-EDU_USDT","B-SUI_USDT","B-JTO_USDT","B-HAEDAL_USDT","B-ATA_USDT","B-ARPA_USDT","B-AUCTION_USDT","B-APE_USDT","B-UMA_USDT","B-HEMI_USDT","B-JASMY_USDT","B-GRIFFAIN_USDT","B-AI_USDT","B-FIS_USDT","B-PENDLE_USDT","B-ARKM_USDT","B-QNT_USDT","B-XAI_USDT","B-MAGIC_USDT","B-2Z_USDT","B-BERA_USDT","B-T_USDT","B-ZETA_USDT","B-OXT_USDT","B-BIGTIME_USDT","B-OG_USDT","B-LAYER_USDT","B-MOVE_USDT","B-SUSHI_USDT","B-BSV_USDT","B-RONIN_USDT","B-DYM_USDT","B-GAS_USDT","B-SOPH_USDT","B-IP_USDT","B-HYPE_USDT","B-POWR_USDT","B-ROSE_USDT","B-MEME_USDT","B-COMP_USDT","B-ARB_USDT","B-TOKEN_USDT","B-JOE_USDT","B-1000SHIB_USDT","B-AEVO_USDT","B-VANRY_USDT","B-SEI_USDT","B-BOME_USDT","B-TNSR_USDT","B-CYBER_USDT","B-GPS_USDT","B-ZKC_USDT","B-BRETT_USDT","B-POPCAT_USDT","B-POLYX_USDT","B-SHELL_USDT","B-TIA_USDT","B-KAITO_USDT","B-MBOX_USDT","B-CAKE_USDT","B-EPIC_USDT","B-BMT_USDT","B-FORM_USDT","B-TUT_USDT","B-ORDI_USDT","B-BROCCOLI714_USDT","B-KAS_USDT","B-1000FLOKI_USDT","B-1000BONK_USDT","B-BANANAS31_USDT","B-SPELL_USDT","B-NIL_USDT","B-FLUX_USDT","B-APT_USDT","B-MAVIA_USDT","B-PERP_USDT","B-RPL_USDT","B-FIDA_USDT","B-FIO_USDT","B-HMSTR_USDT","B-REI_USDT","B-EIGEN_USDT","B-1000CAT_USDT","B-GOAT_USDT","B-MOODENG_USDT","B-PAXG_USDT","B-ZEREBRO_USDT","B-WAXP_USDT","B-LSK_USDT","B-ALT_USDT","B-MLN_USDT","B-NTRN_USDT","B-ATH_USDT","B-STEEM_USDT","B-JUP_USDT","B-XCN_USDT","B-ILV_USDT","B-SAFE_USDT","B-OM_USDT","B-STO_USDT","B-KERNEL_USDT","B-WCT_USDT","B-JST_USDT","B-TON_USDT","B-PUNDIX_USDT","B-DOLO_USDT","B-EDEN_USDT","B-NOM_USDT","B-SXT_USDT","B-YGG_USDT","B-1000SATS_USDT","B-ASR_USDT","B-ALPINE_USDT","B-SYRUP_USDT","B-NXPC_USDT","B-AXL_USDT","B-HUMA_USDT","B-PONKE_USDT","B-GIGGLE_USDT","B-A_USDT","B-SCR_USDT","B-GLM_USDT","B-LA_USDT","B-HOME_USDT","B-DOGE_USDT","B-VIC_USDT","B-RESOLV_USDT","B-USTC_USDT","B-SPK_USDT","B-YB_USDT","B-F_USDT","B-ENA_USDT","B-GUN_USDT","B-NEWT_USDT","B-EUL_USDT","B-ENSO_USDT","B-BABY_USDT","B-ZBT_USDT","B-TURTLE_USDT","B-CC_USDT","B-RIF_USDT","B-SXP_USDT","B-ALLO_USDT","B-TAO_USDT","B-ARK_USDT","B-BB_USDT","B-RED_USDT","B-NOT_USDT","B-MEW_USDT","B-NFP_USDT","B-CELR_USDT","B-MOCA_USDT","B-RENDER_USDT","B-BANANA_USDT","B-KAVA_USDT","B-PLUME_USDT","B-QUICK_USDT","B-POL_USDT","B-TREE_USDT","B-ENS_USDT","B-XVS_USDT","B-SYN_USDT","B-OPEN_USDT","B-SKY_USDT","B-AVNT_USDT","B-ETHFI_USDT","B-IO_USDT","B-LISTA_USDT","B-ZRO_USDT","B-HOLO_USDT","B-BARD_USDT","B-NMR_USDT","B-CHR_USDT","B-SUN_USDT","B-XTZ_USDT","B-HOOK_USDT","B-DOGS_USDT","B-FF_USDT","B-AR_USDT","B-CHILLGUY_USDT","B-YFI_USDT","B-HIGH_USDT","B-COS_USDT","B-LDO_USDT","B-DIA_USDT","B-SIGN_USDT","B-MOVR_USDT","B-WIF_USDT","B-CETUS_USDT","B-1000000MOG_USDT","B-ALICE_USDT","B-GRASS_USDT","B-C_USDT","B-DEGEN_USDT","B-DRIFT_USDT","B-ZK_USDT","B-XPL_USDT","B-WLFI_USDT","B-SOMI_USDT","B-RDNT_USDT","B-NKN_USDT","B-COW_USDT","B-HYPER_USDT","B-LINEA_USDT","B-0G_USDT","B-BAN_USDT","B-STX_USDT","B-VET_USDT","B-DENT_USDT","B-ASTER_USDT","B-MIRA_USDT","B-LUMIA_USDT","B-DOT_USDT","B-HFT_USDT","B-THETA_USDT","B-WLD_USDT","B-LRC_USDT","B-1MBABYDOGE_USDT","B-ZEN_USDT","B-NEAR_USDT","B-PARTI_USDT","B-REZ_USDT","B-SNX_USDT","B-MUBARAK_USDT","B-MANTA_USDT","B-AKT_USDT","B-LPT_USDT","B-AERO_USDT","B-ICP_USDT","B-AGLD_USDT","B-SUPER_USDT","B-TLM_USDT","B-SYS_USDT","B-TWT_USDT","B-LUNA2_USDT","B-ACT_USDT","B-PIXEL_USDT","B-SAGA_USDT","B-CELO_USDT","B-HEI_USDT","B-CTSI_USDT","B-WOO_USDT","B-MAV_USDT","B-DUSK_USDT","B-ME_USDT","B-SWARMS_USDT","B-AXS_USDT","B-USDC_USDT","B-BTC_USDT","B-VTHO_USDT","B-QTUM_USDT","B-W_USDT","B-SCRT_USDT","B-METIS_USDT","B-STRK_USDT","B-CATI_USDT","B-ETH_USDT","B-FLM_USDT","B-G_USDT","B-BICO_USDT","B-ONT_USDT","B-PEOPLE_USDT","B-CHESS_USDT","B-B3_USDT","B-ONE_USDT","B-STG_USDT","B-ALCH_USDT"
-]
+# --- 1. Dynamic Symbol Fetching (CoinDCX) ---
 
-def clean_symbol(s):
-    return s.replace("B-", "").replace("_", "/")
+async def get_coindcx_futures_symbols():
+    url = "https://api.coindcx.com/exchange/v1/markets"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    # Filter for symbols ending in USDT and simplify them
+                    # CoinDCX usually returns simple names or formatted ones.
+                    # We look for valid pairs.
+                    symbols = []
+                    for item in data:
+                        # Logic: Check if it looks like a futures pair or standard pair we want
+                        # CoinDCX 'symbol' example: "BTCUSDT" or "B-BTC_USDT"
+                        # We will try to extract the base currency.
+                        s = item.get('symbol', '')
+                        if s.endswith('USDT'):
+                            # Create a standard CCXT format: "BTC/USDT"
+                            # Remove "B-" prefix if present (common in your previous list)
+                            clean = s.replace("B-", "").replace("_", "") 
+                            base = clean[:-4] # Remove last 4 chars (USDT)
+                            if base:
+                                symbols.append(f"{base}/USDT")
+                    
+                    # Remove duplicates and sort
+                    return sorted(list(set(symbols)))
+    except Exception as e:
+        st.error(f"Error fetching CoinDCX symbols: {e}")
+        return []
+    return []
 
-CLEANED_SYMBOLS = [clean_symbol(s) for s in RAW_SYMBOLS]
-
-# --- Calculation Logic ---
+# --- 2. Multi-Exchange Fetching Logic ---
 
 def calculate_time_aligned_change(ohlcv, interval_hours):
     if not ohlcv: return -9999
@@ -55,12 +80,52 @@ def calculate_time_aligned_change(ohlcv, interval_hours):
         
     return -9999
 
-async def fetch_single_pair(exchange, symbol, original_name):
+async def fetch_ohlcv_from_exchange(exchange, symbol):
+    """Try to fetch data from a specific exchange instance."""
     try:
-        # Reduced candle limit slightly to speed it up
-        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe='15m', limit=100)
-        if len(ohlcv) < 2: return None
+        # Check if exchange supports the symbol
+        # Note: loading markets takes time, so we might skip strict checking 
+        # and just try-catch the fetch.
         
+        # Limit 100 is enough for our calcs
+        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe='15m', limit=100)
+        return ohlcv
+    except Exception:
+        return None
+
+async def fetch_single_symbol_data(sessions, symbol):
+    """
+    Iterates through exchanges in priority order:
+    1. Binance US
+    2. Binance (World)
+    3. Bybit
+    4. MEXC
+    """
+    ohlcv = None
+    source = "Unknown"
+
+    # Priority 1: Binance US
+    if 'binanceus' in sessions:
+        ohlcv = await fetch_ohlcv_from_exchange(sessions['binanceus'], symbol)
+        if ohlcv: source = "BinanceUS"
+
+    # Priority 2: Binance (Global)
+    if not ohlcv and 'binance' in sessions:
+        ohlcv = await fetch_ohlcv_from_exchange(sessions['binance'], symbol)
+        if ohlcv: source = "Binance"
+
+    # Priority 3: Bybit
+    if not ohlcv and 'bybit' in sessions:
+        ohlcv = await fetch_ohlcv_from_exchange(sessions['bybit'], symbol)
+        if ohlcv: source = "Bybit"
+
+    # Priority 4: MEXC
+    if not ohlcv and 'mexc' in sessions:
+        ohlcv = await fetch_ohlcv_from_exchange(sessions['mexc'], symbol)
+        if ohlcv: source = "MEXC"
+
+    # Process Data if found
+    if ohlcv and len(ohlcv) >= 2:
         last_closed_candle = ohlcv[-2]
         current_price = last_closed_candle[4]
         open_15m = last_closed_candle[1]
@@ -70,54 +135,68 @@ async def fetch_single_pair(exchange, symbol, original_name):
         change_24h = calculate_time_aligned_change(ohlcv, 24)
 
         return {
-            "Symbol": original_name.replace("B-", ""),
+            "Symbol": symbol,
             "Price": current_price,
-            "15m": round(change_15m, 2),
-            "1h": round(change_1h, 2) if change_1h != -9999 else None,
-            "4h": round(change_4h, 2) if change_4h != -9999 else None,
-            "24h": round(change_24h, 2) if change_24h != -9999 else None,
+            "Source": source,
+            "15m": change_15m,
+            "1h": change_1h if change_1h != -9999 else None,
+            "4h": change_4h if change_4h != -9999 else None,
+            "24h": change_24h if change_24h != -9999 else None,
         }
-    except Exception:
-        return None
+    return None
 
-async def get_crypto_data():
-    try:
-        exchange = ccxt.bitget({'options': {'defaultType': 'swap'}, 'enableRateLimit': True})
-        
-        # Batch processing
-        batch_size = 50
-        all_results = []
-        
-        for i in range(0, len(CLEANED_SYMBOLS), batch_size):
-            batch_raw = RAW_SYMBOLS[i:i+batch_size]
-            batch_clean = CLEANED_SYMBOLS[i:i+batch_size]
-            
-            tasks = [fetch_single_pair(exchange, sym, raw) for sym, raw in zip(batch_clean, batch_raw)]
-            batch_results = await asyncio.gather(*tasks)
-            all_results.extend(batch_results)
-            await asyncio.sleep(0.5)
-
-        await exchange.close()
-        return [r for r in all_results if r is not None]
-    except Exception as e:
+async def get_all_data():
+    # 1. Get Symbols from CoinDCX
+    symbols = await get_coindcx_futures_symbols()
+    if not symbols:
         return []
 
-# --- Display Logic ---
+    # 2. Initialize Exchanges
+    # We create instances once to reuse connections
+    exchanges = {}
+    try:
+        exchanges['binanceus'] = ccxt.binanceus({'enableRateLimit': True})
+        exchanges['binance'] = ccxt.binance({'enableRateLimit': True})
+        exchanges['bybit'] = ccxt.bybit({'enableRateLimit': True})
+        exchanges['mexc'] = ccxt.mexc({'enableRateLimit': True})
 
-st.title("🚀 Crypto Futures Tracker")
-st.caption("Live Bitget Data | Aligned to Clock Time | Updates every 30s")
+        # 3. Fetch Data in Batches
+        batch_size = 20 # Smaller batch size because we are hitting multiple exchanges
+        all_results = []
+        
+        for i in range(0, len(symbols), batch_size):
+            batch = symbols[i:i+batch_size]
+            tasks = [fetch_single_symbol_data(exchanges, sym) for sym in batch]
+            results = await asyncio.gather(*tasks)
+            all_results.extend([r for r in results if r is not None])
+            # Sleep to respect rate limits
+            await asyncio.sleep(0.5)
 
-@st.fragment(run_every=30)
+    except Exception as e:
+        st.error(f"Critical Error: {e}")
+    finally:
+        # Close all exchange connections
+        for ex in exchanges.values():
+            await ex.close()
+
+    return all_results
+
+# --- 3. Display Logic ---
+
+st.title("🌐 Multi-Exchange Crypto Tracker")
+st.caption("Symbols: CoinDCX | Data: Binance US -> Binance -> Bybit -> MEXC")
+
+@st.fragment(run_every=60) # Increased to 60s because this is a HEAVY operation
 def show_live_data():
-    with st.spinner("Fetching data for 200+ coins..."):
+    with st.spinner("Fetching data across exchanges... (This takes time)"):
         try:
-            data = asyncio.run(get_crypto_data())
+            data = asyncio.run(get_all_data())
         except Exception as e:
-            st.error(f"System Error: {e}")
+            st.error(f"Async Error: {e}")
             return
 
     if not data:
-        st.warning("⚠️ Waiting for data...")
+        st.warning("No data found. Retrying...")
         return
 
     df = pd.DataFrame(data)
@@ -126,22 +205,24 @@ def show_live_data():
          st.warning("Dataframe is empty.")
          return
 
+    # Sort
     df = df.sort_values(by="15m", ascending=False)
     df.reset_index(drop=True, inplace=True)
     df.index += 1
     df.index.name = "Sr"
 
-    # --- FORMATTERS (Fixed TypeError) ---
+    # Formatting
     def format_pct(val):
-        if val is None: return "N/A"
+        if val is None or val == -9999: return "N/A"
         return "{:.2f}%".format(val)
     
     def format_price(val):
         if val is None: return "N/A"
-        return "${:.4f}".format(val)
+        if val < 0.1: return "${:.6f}".format(val) # More decimals for small coins
+        return "${:.2f}".format(val)
 
     def color_map(val):
-        if val is None: return ""
+        if val is None or val == -9999: return ""
         color = '#4CAF50' if val > 0 else '#FF5252'
         return f'color: {color}; font-weight: bold;'
 
@@ -154,13 +235,9 @@ def show_live_data():
                 "4h": format_pct, 
                 "24h": format_pct
             }),
-        width=None, # Replaces use_container_width=True for future proofing if needed, but 'width=None' is default. 
-                    # Actually, to follow the deprecation warning 'use_container_width=True -> width="stretch"'
-        # However, 'use_container_width' still works in current versions. 
-        # I'll use the new standard:
         use_container_width=True, 
         height=800
     )
-    st.caption(f"Last Updated: {datetime.now().strftime('%H:%M:%S')}")
+    st.caption(f"Last Updated: {datetime.now().strftime('%H:%M:%S')} | Total Pairs: {len(df)}")
 
 show_live_data()
