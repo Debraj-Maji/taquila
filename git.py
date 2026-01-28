@@ -3,13 +3,12 @@ import asyncio
 import ccxt.async_support as ccxt
 import pandas as pd
 import aiohttp
-import time
 from datetime import datetime, timedelta
 
 # --- Configuration ---
 st.set_page_config(page_title="CoinDCX Futures 15m Tracker", layout="wide")
 
-# Hide standard menus
+# Hide standard menus and footer
 st.markdown("""
 <style>
 #MainMenu {visibility: hidden;}
@@ -25,6 +24,8 @@ if 'last_fetch_time' not in st.session_state:
     st.session_state.last_fetch_time = None
 if 'total_symbols_count' not in st.session_state:
     st.session_state.total_symbols_count = 0
+if 'missing_symbols' not in st.session_state:
+    st.session_state.missing_symbols = []
 
 # --- 1. Dynamic Symbol Fetching (CoinDCX) ---
 
@@ -95,15 +96,17 @@ async def fetch_single_symbol_data(sessions, symbol):
         ohlcv = await fetch_ohlcv_from_exchange(sessions['binance'], symbol)
         if ohlcv: source = "Binance"
 
-    # Priority 3: Bybit
+    # Priority 3: MEXC
+    if not ohlcv and 'mexc' in sessions:
+        ohlcv = await fetch_ohlcv_from_exchange(sessions['mexc'], symbol)
+        if ohlcv: source = "MEXC"
+            
+    # Priority 4: Bybit
     if not ohlcv and 'bybit' in sessions:
         ohlcv = await fetch_ohlcv_from_exchange(sessions['bybit'], symbol)
         if ohlcv: source = "Bybit"
 
-    # Priority 4: MEXC
-    if not ohlcv and 'mexc' in sessions:
-        ohlcv = await fetch_ohlcv_from_exchange(sessions['mexc'], symbol)
-        if ohlcv: source = "MEXC"
+
 
     if ohlcv and len(ohlcv) >= 2:
         last_closed_candle = ohlcv[-2]
@@ -128,7 +131,6 @@ async def fetch_single_symbol_data(sessions, symbol):
 async def get_all_data():
     symbols = await get_coindcx_futures_symbols()
     
-    # Store total count for display
     st.session_state.total_symbols_count = len(symbols)
     
     if not symbols:
@@ -152,7 +154,6 @@ async def get_all_data():
         for i in range(0, len(symbols), batch_size):
             batch = symbols[i:i+batch_size]
             
-            # Update status
             status_text.text(f"Fetching batch {i//batch_size + 1}/{total_batches}...")
             
             tasks = [fetch_single_symbol_data(exchanges, sym) for sym in batch]
@@ -164,6 +165,11 @@ async def get_all_data():
             
         progress_bar.empty()
         status_text.empty()
+        
+        # --- NEW: Calculate Missing Symbols ---
+        found_symbols = [item['Symbol'] for item in all_results]
+        missing = [s for s in symbols if s not in found_symbols]
+        st.session_state.missing_symbols = missing
 
     except Exception as e:
         st.error(f"Error: {e}")
@@ -177,29 +183,33 @@ async def get_all_data():
 
 st.title("🌐 CoinDCX Futures (15m Interval)")
 
-# Metric Container
-metric_container = st.container()
-
-# We check every 1 minute if it is time to run
 @st.fragment(run_every=60)
 def auto_scheduler():
     now = datetime.now()
     current_minute = now.minute
     
-    # LOGIC:
-    # 1. First Run: If we have NO data, fetch immediately.
-    # 2. Schedule: If minute is 0, 15, 30, or 45 -> Fetch.
-    # 3. Prevent Double Fetch: If we already fetched this specific minute, don't do it again.
+    # --- Layout for Controls ---
+    col1, col2 = st.columns([3, 1])
     
+    with col1:
+        # Calculate Next Run
+        minutes_to_next = 15 - (current_minute % 15)
+        next_run_time = now + timedelta(minutes=minutes_to_next)
+        next_run_time = next_run_time.replace(second=0, microsecond=0)
+        st.caption(f"🕒 Current Time: {now.strftime('%H:%M')} | Next Auto-Fetch: {next_run_time.strftime('%H:%M')} (in {minutes_to_next} min)")
+
+    with col2:
+        # 1. REFRESH BUTTON
+        if st.button("Refresh Now 🔄", use_container_width=True):
+            st.session_state.last_fetch_time = None # Force reset
+            st.rerun() # Restart script to trigger fetch immediately
+
+    # --- FETCH LOGIC ---
     should_fetch = False
     
-    # Logic 1: First Load
     if st.session_state.crypto_data is None:
         should_fetch = True
-        
-    # Logic 2 & 3: Scheduled Time
     elif current_minute % 15 == 0:
-        # Check if we already did it for this specific timestamp
         last_run = st.session_state.last_fetch_time
         if last_run is None or last_run.minute != current_minute:
             should_fetch = True
@@ -214,31 +224,26 @@ def auto_scheduler():
             except Exception as e:
                 st.error(f"Fetch failed: {e}")
     
-    # --- RENDER UI ---
-    
-    # 1. Calculate Next Run
-    minutes_to_next = 15 - (current_minute % 15)
-    next_run_time = now + timedelta(minutes=minutes_to_next)
-    next_run_time = next_run_time.replace(second=0, microsecond=0)
-    
-    st.caption(f"🕒 Current Time: {now.strftime('%H:%M')} | Next Fetch: {next_run_time.strftime('%H:%M')} (in {minutes_to_next} mins)")
-
-    # 2. Show Data if it exists
+    # --- DISPLAY METRICS ---
     if st.session_state.crypto_data:
         df = pd.DataFrame(st.session_state.crypto_data)
         
-        # Calculate Stats
         total_fetched = len(df)
         total_list = st.session_state.total_symbols_count
-        not_found = total_list - total_fetched
+        not_found_count = len(st.session_state.missing_symbols)
         
-        # Update Metrics in the container
-        with metric_container:
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Total CoinDCX List", total_list)
-            c2.metric("Successfully Fetched", total_fetched)
-            c3.metric("Not Found / Offline", not_found, delta_color="inverse")
-            st.divider()
+        # Metrics Row
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Total CoinDCX List", total_list)
+        m2.metric("Successfully Fetched", total_fetched)
+        m3.metric("Not Found / Offline", not_found_count, delta_color="inverse")
+        
+        # 2. NOT FOUND LIST (Expander)
+        if not_found_count > 0:
+            with st.expander(f"⚠️ Show {not_found_count} Missing Symbols"):
+                st.write(", ".join(st.session_state.missing_symbols))
+        
+        st.divider()
 
         # Sort and Format
         df = df.sort_values(by="15m", ascending=False)
@@ -260,6 +265,7 @@ def auto_scheduler():
             color = '#4CAF50' if val > 0 else '#FF5252'
             return f'color: {color}; font-weight: bold;'
 
+        # 3. CLICKABLE TABLE (Disabled row selection, kept header sorting)
         st.dataframe(
             df.style.map(color_map, subset=['15m', '1h', '4h', '24h'])
                 .format({
@@ -270,10 +276,12 @@ def auto_scheduler():
                     "24h": format_pct
                 }),
             use_container_width=True, 
-            height=800
+            height=800,
+            # This ensures standard sorting behavior without highlighting full rows
+            on_select="ignore" 
         )
     else:
         st.info("Initializing... Waiting for data.")
 
-# Start the scheduler
+# Start
 auto_scheduler()
