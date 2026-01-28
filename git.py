@@ -147,8 +147,8 @@ async def get_all_data():
     # 2. Init Exchanges
     all_exchanges = {
         'Bitget': ccxt.bitget({'options': {'defaultType': 'swap'}, 'enableRateLimit': True}),
-        'BinanceUS': ccxt.binanceus({'enableRateLimit': True}),
-        'MEXC': ccxt.mexc({'enableRateLimit': True})
+        'MEXC': ccxt.mexc({'enableRateLimit': True}),
+        'BinanceUS': ccxt.binanceus({'enableRateLimit': True})
     }
     
     active_exchanges = {}
@@ -326,3 +326,4 @@ def auto_scheduler():
         st.info("Initializing...")
 
 auto_scheduler()
+
