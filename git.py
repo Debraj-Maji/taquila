@@ -20,7 +20,7 @@ header {visibility: hidden;}
 # --- 1. Dynamic Symbol Fetching (CoinDCX) ---
 
 async def get_coindcx_futures_symbols():
-    url = "https://api.coindcx.com/exchange/v1/markets"
+    url = "https://api.coindcx.com/exchange/v1/derivatives/futures/data/active_instruments?margin_currency_short_name[]=INR"
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url) as response:
@@ -241,3 +241,4 @@ def show_live_data():
     st.caption(f"Last Updated: {datetime.now().strftime('%H:%M:%S')} | Total Pairs: {len(df)}")
 
 show_live_data()
+
