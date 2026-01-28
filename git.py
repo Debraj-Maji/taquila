@@ -3,11 +3,11 @@ import asyncio
 import ccxt.async_support as ccxt
 import pandas as pd
 import aiohttp
-import time  # Added time module
+import time
 from datetime import datetime, timedelta
 
 # --- Configuration ---
-st.set_page_config(page_title="Crypto Futures Tracker", layout="wide")
+st.set_page_config(page_title="CoinDCX Futures (Bitget Data)", layout="wide")
 
 # Hide standard menus
 st.markdown("""
@@ -27,7 +27,7 @@ if 'total_symbols_count' not in st.session_state:
     st.session_state.total_symbols_count = 0
 if 'missing_symbols' not in st.session_state:
     st.session_state.missing_symbols = []
-if 'fetch_logs' not in st.session_state: # New state for logs
+if 'fetch_logs' not in st.session_state:
     st.session_state.fetch_logs = []
 
 # --- 1. Dynamic Symbol Fetching (CoinDCX) ---
@@ -48,17 +48,25 @@ async def get_coindcx_futures_symbols():
         return []
     return []
 
-# --- 2. Optimized Fetching Logic ---
+# --- 2. Bitget Fetching Logic (Matches your Local Script) ---
 
 def calculate_time_aligned_change(ohlcv, interval_hours):
+    """
+    Exact copy of your local script logic.
+    Calculates change based on aligned clock times (rolling windows).
+    """
     if not ohlcv: return -9999
+    
     ms_per_hour = 3600 * 1000
     ms_interval = interval_hours * ms_per_hour
     last_ts = ohlcv[-1][0]
+    
+    # Calculate the Timestamp for the Start of the PREVIOUS interval
     current_block_start = last_ts - (last_ts % ms_interval)
     target_open_ts = current_block_start - ms_interval
     
     open_price = None
+    
     for candle in ohlcv:
         if candle[0] == target_open_ts:
             open_price = candle[1]
@@ -71,40 +79,20 @@ def calculate_time_aligned_change(ohlcv, interval_hours):
             break
             
     if open_price is not None and current_block_index > 0:
+        # The close price is the close of the candle BEFORE the current block starts
         close_price = ohlcv[current_block_index - 1][4]
         return ((close_price - open_price) / open_price) * 100
-    return -9999
-
-def calculate_day_change(ohlcv):
-    if not ohlcv or len(ohlcv) < 2: return -9999
-    
-    last_ts = ohlcv[-1][0] 
-    ms_per_day = 86400000 
-    start_of_day_ts = last_ts - (last_ts % ms_per_day)
-    
-    day_open_price = None
-    for candle in ohlcv:
-        if candle[0] == start_of_day_ts:
-            day_open_price = candle[1]
-            break
-            
-    last_completed_candle = ohlcv[-2]
-    last_completed_ts = last_completed_candle[0]
-    last_completed_close = last_completed_candle[4]
-    
-    if last_completed_ts < start_of_day_ts:
-        return 0.0
-        
-    if day_open_price is not None:
-        return ((last_completed_close - day_open_price) / day_open_price) * 100
         
     return -9999
 
-async def fetch_ohlcv_direct(exchange, symbol, source_name):
+async def fetch_ohlcv_bitget(exchange, symbol):
     try:
-        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe='15m', limit=100)
+        # Fetch 110 candles (Matches your local script limit)
+        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe='15m', limit=110)
+        
         if not ohlcv or len(ohlcv) < 2: return None
 
+        # Matches your local script logic exactly
         last_closed_candle = ohlcv[-2]
         current_price = last_closed_candle[4]
         open_15m = last_closed_candle[1]
@@ -112,108 +100,82 @@ async def fetch_ohlcv_direct(exchange, symbol, source_name):
         return {
             "Symbol": symbol,
             "Price": current_price,
-            "Source": source_name,
+            "Source": "Bitget",
             "15m": ((current_price - open_15m) / open_15m) * 100,
             "1h": calculate_time_aligned_change(ohlcv, 1),
             "4h": calculate_time_aligned_change(ohlcv, 4),
-            "24h": calculate_day_change(ohlcv),
+            "24h": calculate_time_aligned_change(ohlcv, 24), # Used your local logic here
         }
     except Exception:
         return None
 
-async def safe_load_markets(exchange, name):
-    try:
-        await exchange.load_markets()
-        return True
-    except Exception:
-        return False
-
 async def get_all_data():
-    logs = [] # Local log collector
+    logs = []
     
-    # 1. Get Target List
+    # 1. Get List
     t_start = time.time()
     target_symbols = await get_coindcx_futures_symbols()
     t_end = time.time()
-    logs.append(f"Fetched CoinDCX List: {len(target_symbols)} symbols in {t_end - t_start:.2f}s")
+    logs.append(f"Fetched List: {len(target_symbols)} symbols in {t_end - t_start:.2f}s")
     
     st.session_state.total_symbols_count = len(target_symbols)
     if not target_symbols: return []
 
-    # 2. Init Only Allowed Exchanges
-    all_exchanges = {
-        'BinanceUS': ccxt.binanceus({'enableRateLimit': True}),
-        'MEXC': ccxt.mexc({'enableRateLimit': True}) 
-    }
-
-    active_exchanges = {}
+    # 2. Init Bitget (Exactly like local script)
+    exchange = ccxt.bitget({
+        'options': {'defaultType': 'swap'}, 
+        'enableRateLimit': True
+    })
 
     try:
-        # 3. Load Markets
+        # 3. Load Markets to Map Symbols
         t_start = time.time()
-        tasks = [safe_load_markets(ex, name) for name, ex in all_exchanges.items()]
-        results = await asyncio.gather(*tasks)
-        t_end = time.time()
-        logs.append(f"Loaded Exchange Markets in {t_end - t_start:.2f}s")
-
-        for (name, ex), success in zip(all_exchanges.items(), results):
-            if success:
-                active_exchanges[name] = ex
-            else:
-                await ex.close()
-
-        if not active_exchanges:
-            st.error("Could not connect to BinanceUS or MEXC.")
+        try:
+            await exchange.load_markets()
+            logs.append(f"Loaded Bitget Markets in {time.time() - t_start:.2f}s")
+        except Exception as e:
+            st.error(f"Bitget Connection Error: {e}")
+            await exchange.close()
             return []
 
-        # 4. Map Symbols
-        valid_map = {} 
-        priority_order = ['BinanceUS', 'MEXC']
-        final_priority = [p for p in priority_order if p in active_exchanges]
-
-        for symbol in target_symbols:
-            for name in final_priority:
-                ex = active_exchanges[name]
-                if symbol in ex.markets:
-                    valid_map[symbol] = (name, ex)
-                    break 
+        # 4. Filter Valid Symbols
+        valid_symbols = []
+        for sym in target_symbols:
+            if sym in exchange.markets:
+                valid_symbols.append(sym)
+        
+        st.session_state.missing_symbols = [s for s in target_symbols if s not in valid_symbols]
         
         # 5. Fetch Data
-        batch_size = 100 
+        batch_size = 50 
         all_results = []
         
-        found_keys = valid_map.keys()
-        st.session_state.missing_symbols = [s for s in target_symbols if s not in found_keys]
-
-        tasks = []
-        for symbol, (name, ex) in valid_map.items():
-            tasks.append(fetch_ohlcv_direct(ex, symbol, name))
-
         progress_bar = st.progress(0)
         status_text = st.empty()
-        total_tasks = len(tasks)
+        total_valid = len(valid_symbols)
         
-        if total_tasks > 0:
-            for i in range(0, total_tasks, batch_size):
-                b_start = time.time() # Batch Start Time
+        if total_valid > 0:
+            for i in range(0, total_valid, batch_size):
+                b_start = time.time()
                 
-                batch = tasks[i:i+batch_size]
+                batch = valid_symbols[i:i+batch_size]
                 batch_num = i//batch_size + 1
                 status_text.text(f"Fetching batch {batch_num}...")
                 
-                results = await asyncio.gather(*batch)
+                tasks = [fetch_ohlcv_bitget(exchange, sym) for sym in batch]
+                results = await asyncio.gather(*tasks)
                 all_results.extend([r for r in results if r is not None])
                 
-                b_end = time.time() # Batch End Time
-                logs.append(f"Batch {batch_num} ({len(batch)} items): {b_end - b_start:.2f}s")
+                b_end = time.time()
+                logs.append(f"Batch {batch_num}: {b_end - b_start:.2f}s")
                 
-                progress_bar.progress(min((i + batch_size) / total_tasks, 1.0))
+                progress_bar.progress(min((i + batch_size) / total_valid, 1.0))
+                # Bitget rate limits are stricter than MEXC
                 await asyncio.sleep(0.5)
 
         progress_bar.empty()
         status_text.empty()
         
-        # Save logs to session state to display later
         st.session_state.fetch_logs = logs
         return all_results
 
@@ -221,12 +183,11 @@ async def get_all_data():
         st.error(f"Error: {e}")
         return []
     finally:
-        for ex in active_exchanges.values():
-            await ex.close()
+        await exchange.close()
 
 # --- 3. UI & Logic ---
 
-st.title("🌐 Crypto Tracker Future")
+st.title("🌐 CoinDCX Futures (Bitget Source)")
 
 @st.fragment(run_every=60)
 def auto_scheduler():
@@ -252,7 +213,7 @@ def auto_scheduler():
             should_fetch = True
 
     if should_fetch:
-        with st.spinner("🚀 Fetching 15m Candles..."):
+        with st.spinner("🚀 Fetching Bitget Data..."):
             new_data = asyncio.run(get_all_data())
             if new_data:
                 st.session_state.crypto_data = new_data
@@ -266,20 +227,12 @@ def auto_scheduler():
         m2.metric("Fetched", len(df))
         m3.metric("Missing", len(st.session_state.missing_symbols), delta_color="inverse")
         
-        # --- LOGS SECTION ---
-        with st.expander("⏱️ View Fetch Times & Missing Symbols"):
-            tab1, tab2 = st.tabs(["Missing Symbols", "Performance Logs"])
-            
+        with st.expander("⏱️ Logs & Missing Symbols"):
+            tab1, tab2 = st.tabs(["Missing", "Logs"])
             with tab1:
-                if st.session_state.missing_symbols:
-                    st.write(", ".join(st.session_state.missing_symbols))
-                else:
-                    st.success("All symbols found!")
-            
+                st.write(", ".join(st.session_state.missing_symbols) if st.session_state.missing_symbols else "None")
             with tab2:
-                if st.session_state.fetch_logs:
-                    for log in st.session_state.fetch_logs:
-                        st.text(log)
+                for log in st.session_state.fetch_logs: st.text(log)
         
         st.divider()
 
