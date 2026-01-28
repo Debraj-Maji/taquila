@@ -29,6 +29,8 @@ if 'missing_symbols' not in st.session_state:
     st.session_state.missing_symbols = []
 if 'fetch_logs' not in st.session_state:
     st.session_state.fetch_logs = []
+if 'market_map' not in st.session_state: # Cache for Exchange Markets
+    st.session_state.market_map = None
 
 # --- 1. Dynamic Symbol Fetching (CoinDCX) ---
 async def get_coindcx_futures_symbols():
@@ -48,25 +50,18 @@ async def get_coindcx_futures_symbols():
         return []
     return []
 
-# --- 2. Bitget Fetching Logic (Matches your Local Script) ---
+# --- 2. Bitget Fetching Logic ---
 
 def calculate_time_aligned_change(ohlcv, interval_hours):
-    """
-    Exact copy of your local script logic.
-    Calculates change based on aligned clock times (rolling windows).
-    """
     if not ohlcv: return -9999
-    
     ms_per_hour = 3600 * 1000
     ms_interval = interval_hours * ms_per_hour
     last_ts = ohlcv[-1][0]
     
-    # Calculate the Timestamp for the Start of the PREVIOUS interval
     current_block_start = last_ts - (last_ts % ms_interval)
     target_open_ts = current_block_start - ms_interval
     
     open_price = None
-    
     for candle in ohlcv:
         if candle[0] == target_open_ts:
             open_price = candle[1]
@@ -79,20 +74,17 @@ def calculate_time_aligned_change(ohlcv, interval_hours):
             break
             
     if open_price is not None and current_block_index > 0:
-        # The close price is the close of the candle BEFORE the current block starts
         close_price = ohlcv[current_block_index - 1][4]
         return ((close_price - open_price) / open_price) * 100
-        
     return -9999
 
 async def fetch_ohlcv_bitget(exchange, symbol):
     try:
-        # Fetch 110 candles (Matches your local script limit)
+        # Fetch 110 candles
         ohlcv = await exchange.fetch_ohlcv(symbol, timeframe='15m', limit=110)
         
         if not ohlcv or len(ohlcv) < 2: return None
 
-        # Matches your local script logic exactly
         last_closed_candle = ohlcv[-2]
         current_price = last_closed_candle[4]
         open_15m = last_closed_candle[1]
@@ -104,7 +96,7 @@ async def fetch_ohlcv_bitget(exchange, symbol):
             "15m": ((current_price - open_15m) / open_15m) * 100,
             "1h": calculate_time_aligned_change(ohlcv, 1),
             "4h": calculate_time_aligned_change(ohlcv, 4),
-            "24h": calculate_time_aligned_change(ohlcv, 24), # Used your local logic here
+            "24h": calculate_time_aligned_change(ohlcv, 24),
         }
     except Exception:
         return None
@@ -116,37 +108,48 @@ async def get_all_data():
     t_start = time.time()
     target_symbols = await get_coindcx_futures_symbols()
     t_end = time.time()
-    logs.append(f"Fetched List: {len(target_symbols)} symbols in {t_end - t_start:.2f}s")
+    logs.append(f"Fetched CoinDCX List: {len(target_symbols)} symbols in {t_end - t_start:.2f}s")
     
     st.session_state.total_symbols_count = len(target_symbols)
     if not target_symbols: return []
 
-    # 2. Init Bitget (Exactly like local script)
+    # 2. Init Bitget
     exchange = ccxt.bitget({
         'options': {'defaultType': 'swap'}, 
         'enableRateLimit': True
     })
 
     try:
-        # 3. Load Markets to Map Symbols
-        t_start = time.time()
-        try:
-            await exchange.load_markets()
-            logs.append(f"Loaded Bitget Markets in {time.time() - t_start:.2f}s")
-        except Exception as e:
-            st.error(f"Bitget Connection Error: {e}")
-            await exchange.close()
-            return []
+        # 3. Load Markets (CACHED)
+        # We only load this if we haven't done it this session to save time
+        if st.session_state.market_map is None:
+            t_start = time.time()
+            try:
+                await exchange.load_markets()
+                # Save just the keys (symbol names) to session state to save RAM
+                st.session_state.market_map = list(exchange.markets.keys()) 
+                logs.append(f"Loaded & Cached Bitget Markets in {time.time() - t_start:.2f}s")
+            except Exception as e:
+                st.error(f"Bitget Connection Error: {e}")
+                await exchange.close()
+                return []
+        else:
+            # Inject the cached markets back into the exchange object manually
+            # (This is a CCXT trick to avoid re-fetching)
+            exchange.markets = {s: {} for s in st.session_state.market_map}
+            logs.append("Used Cached Market List (Saved API Call)")
 
         # 4. Filter Valid Symbols
+        # We compare CoinDCX list vs Bitget List
         valid_symbols = []
         for sym in target_symbols:
-            if sym in exchange.markets:
+            if sym in st.session_state.market_map:
                 valid_symbols.append(sym)
         
         st.session_state.missing_symbols = [s for s in target_symbols if s not in valid_symbols]
         
         # 5. Fetch Data
+        # We assume 95% of symbols are valid, so we just iterate the valid list
         batch_size = 50 
         all_results = []
         
@@ -170,7 +173,8 @@ async def get_all_data():
                 logs.append(f"Batch {batch_num}: {b_end - b_start:.2f}s")
                 
                 progress_bar.progress(min((i + batch_size) / total_valid, 1.0))
-                # Bitget rate limits are stricter than MEXC
+                
+                # Sleep is critical for Bitget to avoid "429 Too Many Requests"
                 await asyncio.sleep(0.5)
 
         progress_bar.empty()
@@ -200,13 +204,23 @@ def auto_scheduler():
         next_run = (now + timedelta(minutes=minutes_to_next)).strftime('%H:%M')
         st.caption(f"🕒 Time: {now.strftime('%H:%M')} | Next: {next_run}")
     with col2:
+        # FIXED REFRESH BUTTON
         if st.button("🔄 Refresh", use_container_width=True):
-            st.session_state.last_fetch_time = None
+            # 1. Clear data to force a re-fetch logic
+            st.session_state.crypto_data = None 
+            # 2. Reset last time so it doesn't think it already ran
+            st.session_state.last_fetch_time = None 
+            # 3. Rerun to restart the script from top
             st.rerun()
 
+    # LOGIC: Should we fetch?
     should_fetch = False
+    
+    # Condition 1: No data exists (First run or Refresh pressed)
     if st.session_state.crypto_data is None:
         should_fetch = True
+        
+    # Condition 2: It is 00, 15, 30, 45 AND we haven't run this minute
     elif current_minute % 15 == 0:
         last = st.session_state.last_fetch_time
         if last is None or last.minute != current_minute:
