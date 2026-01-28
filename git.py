@@ -20,31 +20,32 @@ header {visibility: hidden;}
 # --- 1. Dynamic Symbol Fetching (CoinDCX) ---
 
 async def get_coindcx_futures_symbols():
+    # The specific URL you provided
     url = "https://api.coindcx.com/exchange/v1/derivatives/futures/data/active_instruments?margin_currency_short_name[]=INR"
+    
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url) as response:
                 if response.status == 200:
                     data = await response.json()
-                    # Filter for symbols ending in USDT and simplify them
-                    # CoinDCX usually returns simple names or formatted ones.
-                    # We look for valid pairs.
-                    symbols = []
-                    for item in data:
-                        # Logic: Check if it looks like a futures pair or standard pair we want
-                        # CoinDCX 'symbol' example: "BTCUSDT" or "B-BTC_USDT"
-                        # We will try to extract the base currency.
-                        s = item.get('symbol', '')
-                        if s.endswith('USDT'):
-                            # Create a standard CCXT format: "BTC/USDT"
-                            # Remove "B-" prefix if present (common in your previous list)
-                            clean = s.replace("B-", "").replace("_", "") 
-                            base = clean[:-4] # Remove last 4 chars (USDT)
-                            if base:
-                                symbols.append(f"{base}/USDT")
                     
-                    # Remove duplicates and sort
+                    # The data is a simple list of strings: ["B-BTC_USDT", "B-ETH_USDT", ...]
+                    symbols = []
+                    for s in data:
+                        # Safety check: ensure item is a string and ends with USDT
+                        if isinstance(s, str) and s.endswith('USDT'):
+                            # Logic: 
+                            # 1. Remove "B-" prefix
+                            # 2. Replace "_" with "/" to match standard CCXT format
+                            # Example: "B-BTC_USDT" -> "BTC/USDT"
+                            clean = s.replace("B-", "").replace("_", "/")
+                            symbols.append(clean)
+                    
+                    # Remove duplicates and sort alphabetically
                     return sorted(list(set(symbols)))
+                else:
+                    st.error(f"CoinDCX API Error: Status {response.status}")
+                    return []
     except Exception as e:
         st.error(f"Error fetching CoinDCX symbols: {e}")
         return []
@@ -83,11 +84,7 @@ def calculate_time_aligned_change(ohlcv, interval_hours):
 async def fetch_ohlcv_from_exchange(exchange, symbol):
     """Try to fetch data from a specific exchange instance."""
     try:
-        # Check if exchange supports the symbol
-        # Note: loading markets takes time, so we might skip strict checking 
-        # and just try-catch the fetch.
-        
-        # Limit 100 is enough for our calcs
+        # Fetch 100 candles (enough for 24h calc)
         ohlcv = await exchange.fetch_ohlcv(symbol, timeframe='15m', limit=100)
         return ohlcv
     except Exception:
@@ -148,11 +145,12 @@ async def fetch_single_symbol_data(sessions, symbol):
 async def get_all_data():
     # 1. Get Symbols from CoinDCX
     symbols = await get_coindcx_futures_symbols()
+    
     if not symbols:
+        st.warning("No symbols found from CoinDCX API.")
         return []
 
     # 2. Initialize Exchanges
-    # We create instances once to reuse connections
     exchanges = {}
     try:
         exchanges['binanceus'] = ccxt.binanceus({'enableRateLimit': True})
@@ -161,16 +159,27 @@ async def get_all_data():
         exchanges['mexc'] = ccxt.mexc({'enableRateLimit': True})
 
         # 3. Fetch Data in Batches
-        batch_size = 20 # Smaller batch size because we are hitting multiple exchanges
+        batch_size = 20
         all_results = []
+        
+        # Create a progress bar
+        progress_bar = st.progress(0)
+        total_batches = (len(symbols) // batch_size) + 1
         
         for i in range(0, len(symbols), batch_size):
             batch = symbols[i:i+batch_size]
             tasks = [fetch_single_symbol_data(exchanges, sym) for sym in batch]
             results = await asyncio.gather(*tasks)
             all_results.extend([r for r in results if r is not None])
+            
+            # Update progress
+            current_batch = (i // batch_size) + 1
+            progress_bar.progress(min(current_batch / total_batches, 1.0))
+            
             # Sleep to respect rate limits
             await asyncio.sleep(0.5)
+            
+        progress_bar.empty()
 
     except Exception as e:
         st.error(f"Critical Error: {e}")
@@ -183,12 +192,12 @@ async def get_all_data():
 
 # --- 3. Display Logic ---
 
-st.title("🌐 Multi-Exchange Crypto Tracker")
-st.caption("Symbols: CoinDCX | Data: Binance US -> Binance -> Bybit -> MEXC")
+st.title("🌐 CoinDCX Futures Tracker")
+st.caption("Live Data from CoinDCX List -> Fetched via Binance/Bybit/MEXC")
 
-@st.fragment(run_every=60) # Increased to 60s because this is a HEAVY operation
+@st.fragment(run_every=60)
 def show_live_data():
-    with st.spinner("Fetching data across exchanges... (This takes time)"):
+    with st.spinner("Fetching live market data..."):
         try:
             data = asyncio.run(get_all_data())
         except Exception as e:
@@ -196,7 +205,7 @@ def show_live_data():
             return
 
     if not data:
-        st.warning("No data found. Retrying...")
+        st.warning("No data found or API is blocking requests. Retrying...")
         return
 
     df = pd.DataFrame(data)
@@ -218,7 +227,7 @@ def show_live_data():
     
     def format_price(val):
         if val is None: return "N/A"
-        if val < 0.1: return "${:.6f}".format(val) # More decimals for small coins
+        if val < 0.1: return "${:.6f}".format(val)
         return "${:.2f}".format(val)
 
     def color_map(val):
@@ -241,4 +250,3 @@ def show_live_data():
     st.caption(f"Last Updated: {datetime.now().strftime('%H:%M:%S')} | Total Pairs: {len(df)}")
 
 show_live_data()
-
