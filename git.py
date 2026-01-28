@@ -75,6 +75,7 @@ def calculate_time_aligned_change(ohlcv, interval_hours):
 async def fetch_ohlcv_direct(exchange, symbol, source_name):
     """Fetch directly from the known valid exchange"""
     try:
+        # Fetch 100 candles (Enough for 24h calculation)
         ohlcv = await exchange.fetch_ohlcv(symbol, timeframe='15m', limit=100)
         if not ohlcv or len(ohlcv) < 2: return None
 
@@ -95,63 +96,58 @@ async def fetch_ohlcv_direct(exchange, symbol, source_name):
         return None
 
 async def safe_load_markets(exchange, name):
-    """Safely load markets. If blocked (451), return False so we don't crash."""
     try:
         await exchange.load_markets()
         return True
-    except Exception as e:
-        # If it's a 451 error (Geo-block) or timeout, we just skip this exchange
-        print(f"Skipping {name} due to error: {e}") 
+    except Exception:
         return False
 
 async def get_all_data():
-    # 1. Get Target List
+    # 1. Get Target List from CoinDCX
     target_symbols = await get_coindcx_futures_symbols()
     st.session_state.total_symbols_count = len(target_symbols)
     if not target_symbols: return []
 
-    # 2. Init Exchanges
+    # 2. Init Only Allowed Exchanges (BinanceUS & MEXC)
     all_exchanges = {
         'BinanceUS': ccxt.binanceus({'enableRateLimit': True}),
-        'Binance': ccxt.binance({'enableRateLimit': True}),
-        'Bybit': ccxt.bybit({'enableRateLimit': True}),
-        'MEXC': ccxt.mexc({'enableRateLimit': True})
+        'MEXC': ccxt.mexc({'enableRateLimit': True}) 
     }
 
     active_exchanges = {}
 
     try:
-        # 3. SAFE MAPPING: Load markets individually and check for blocks
-        # We run this in parallel but catch errors for each one
+        # 3. Load Markets (Just 2 calls now)
         tasks = [safe_load_markets(ex, name) for name, ex in all_exchanges.items()]
         results = await asyncio.gather(*tasks)
 
-        # Only keep exchanges that successfully loaded
         for (name, ex), success in zip(all_exchanges.items(), results):
             if success:
                 active_exchanges[name] = ex
             else:
-                # Close the failed connection immediately
                 await ex.close()
 
         if not active_exchanges:
-            st.error("All exchanges failed to connect. Check internet or API status.")
+            st.error("Could not connect to BinanceUS or MEXC.")
             return []
 
-        # 4. Build Map using only ACTIVE exchanges
+        # 4. Map Symbols (Priority: BinanceUS -> MEXC)
         valid_map = {} 
-        # Priority: BinanceUS -> Binance -> Bybit -> MEXC
-        priority_order = [name for name in ['BinanceUS', 'Binance', 'Bybit', 'MEXC'] if name in active_exchanges]
+        priority_order = ['BinanceUS', 'MEXC'] # Check BinanceUS first, then MEXC
         
+        # Only check available exchanges
+        final_priority = [p for p in priority_order if p in active_exchanges]
+
         for symbol in target_symbols:
-            for name in priority_order:
+            for name in final_priority:
                 ex = active_exchanges[name]
                 if symbol in ex.markets:
                     valid_map[symbol] = (name, ex)
                     break 
         
         # 5. Fetch Data
-        batch_size = 50 
+        # MEXC allows many requests, so we can use a larger batch size
+        batch_size = 100 
         all_results = []
         
         found_keys = valid_map.keys()
@@ -183,13 +179,12 @@ async def get_all_data():
         st.error(f"Error: {e}")
         return []
     finally:
-        # Close all active exchange connections
         for ex in active_exchanges.values():
             await ex.close()
 
 # --- 3. UI & Logic ---
 
-st.title("🌐 CoinDCX Futures (Optimized)")
+st.title("🌐 CoinDCX Tracker (BinanceUS + MEXC)")
 
 @st.fragment(run_every=60)
 def auto_scheduler():
@@ -215,7 +210,7 @@ def auto_scheduler():
             should_fetch = True
 
     if should_fetch:
-        with st.spinner("🚀 Connecting to exchanges (Skipping blocked ones)..."):
+        with st.spinner("🚀 Fetching 15m Candles..."):
             new_data = asyncio.run(get_all_data())
             if new_data:
                 st.session_state.crypto_data = new_data
