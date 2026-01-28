@@ -31,8 +31,11 @@ if 'fetch_logs' not in st.session_state:
     st.session_state.fetch_logs = []
 if 'market_map' not in st.session_state:
     st.session_state.market_map = None 
-if 'last_duration' not in st.session_state: # New: Track total time
-    st.session_state.last_duration = 0.0
+# NEW: Stats Counters
+if 'source_counts' not in st.session_state:
+    st.session_state.source_counts = {"Bitget": 0, "BinanceUS": 0, "MEXC": 0}
+if 'fetch_duration' not in st.session_state:
+    st.session_state.fetch_duration = 0.0
 
 # --- 1. Dynamic Symbol Fetching (CoinDCX) ---
 async def get_coindcx_futures_symbols():
@@ -81,7 +84,9 @@ def calculate_time_aligned_change(ohlcv, interval_hours):
     return -9999
 
 def calculate_day_change(ohlcv):
+    """Calculates change from TODAY 00:00 UTC to Last Completed Candle Close."""
     if not ohlcv or len(ohlcv) < 2: return -9999
+    
     last_ts = ohlcv[-1][0] 
     ms_per_day = 86400000 
     start_of_day_ts = last_ts - (last_ts % ms_per_day)
@@ -97,11 +102,12 @@ def calculate_day_change(ohlcv):
     
     if day_open_price is not None and day_open_price > 0:
         return ((last_completed_close - day_open_price) / day_open_price) * 100
+        
     return -9999
 
 async def fetch_ohlcv_direct(exchange, symbol, source_name):
     try:
-        # 200 candles ensures we find the 00:00 UTC start time
+        # Limit 200 ensures we find the 00:00 UTC candle
         ohlcv = await exchange.fetch_ohlcv(symbol, timeframe='15m', limit=200)
         
         if not ohlcv or len(ohlcv) < 2: return None
@@ -113,7 +119,7 @@ async def fetch_ohlcv_direct(exchange, symbol, source_name):
         return {
             "Symbol": symbol,
             "Price": current_price,
-            "Source": source_name, # Shows "Bybit", "Bitget", etc.
+            "Source": source_name,
             "15m": ((current_price - open_15m) / open_15m) * 100,
             "1h": calculate_time_aligned_change(ohlcv, 1),
             "4h": calculate_time_aligned_change(ohlcv, 4),
@@ -130,28 +136,26 @@ async def safe_load_markets(exchange, name):
         return False
 
 async def get_all_data():
-    t_total_start = time.time() # START TOTAL TIMER
+    t_total_start = time.time() # START TIMER
     logs = []
     
-    # 1. Get List
+    # 1. Get CoinDCX List
     target_symbols = await get_coindcx_futures_symbols()
     st.session_state.total_symbols_count = len(target_symbols)
-    if not target_symbols: return []
+    if not target_symbols: return [], {}, 0
 
-    # 2. Init Exchanges (Added Bybit)
+    # 2. Init Exchanges
     all_exchanges = {
         'Bitget': ccxt.bitget({'options': {'defaultType': 'swap'}, 'enableRateLimit': True}),
         'BinanceUS': ccxt.binanceus({'enableRateLimit': True}),
-        'Bybit': ccxt.bybit({'enableRateLimit': True}), # Added Bybit
         'MEXC': ccxt.mexc({'enableRateLimit': True})
     }
     
     active_exchanges = {}
 
     try:
-        # 3. Load Markets & Map (Cached)
+        # 3. Load Markets & Map Symbols
         if st.session_state.market_map is None:
-            t_map_start = time.time()
             tasks = [safe_load_markets(ex, name) for name, ex in all_exchanges.items()]
             results = await asyncio.gather(*tasks)
 
@@ -161,12 +165,10 @@ async def get_all_data():
                 else:
                     await ex.close()
 
-            # Priority Map: Bitget -> BinanceUS -> Bybit -> MEXC
+            # Build Map: Priority Bitget > BinanceUS > MEXC
             market_map = {} 
             valid_symbols = []
-            
-            # Filter priority based on what connected successfully
-            priority_order = [n for n in ['Bitget', 'BinanceUS', 'Bybit', 'MEXC'] if n in active_exchanges]
+            priority_order = [n for n in ['Bitget', 'BinanceUS', 'MEXC'] if n in active_exchanges]
             
             for sym in target_symbols:
                 for name in priority_order:
@@ -176,8 +178,8 @@ async def get_all_data():
                         valid_symbols.append(sym)
                         break
             
-            st.session_state.market_map = market_map 
-            logs.append(f"Mapped markets in {time.time() - t_map_start:.2f}s")
+            st.session_state.market_map = market_map
+            
         else:
             # Restore connections
             tasks = [safe_load_markets(ex, name) for name, ex in all_exchanges.items()]
@@ -185,14 +187,15 @@ async def get_all_data():
             active_exchanges = all_exchanges 
             market_map = st.session_state.market_map
             valid_symbols = list(market_map.keys())
-            logs.append("Used Cached Exchange Map")
 
+        # Identify missing
         st.session_state.missing_symbols = [s for s in target_symbols if s not in valid_symbols]
 
         # 4. Fetch Data
         batch_size = 50 
         all_results = []
         
+        # Prepare Tasks
         tasks = []
         for sym in valid_symbols:
             exchange_name = market_map[sym]
@@ -200,38 +203,39 @@ async def get_all_data():
                 ex_obj = active_exchanges[exchange_name]
                 tasks.append(fetch_ohlcv_direct(ex_obj, sym, exchange_name))
 
+        # Run Batches
         progress_bar = st.progress(0)
         status_text = st.empty()
         total_tasks = len(tasks)
         
         if total_tasks > 0:
             for i in range(0, total_tasks, batch_size):
-                b_start = time.time()
                 batch = tasks[i:i+batch_size]
-                
                 results = await asyncio.gather(*batch)
                 all_results.extend([r for r in results if r is not None])
                 
-                logs.append(f"Batch {i//batch_size + 1}: {time.time() - b_start:.2f}s")
                 progress_bar.progress(min((i + batch_size) / total_tasks, 1.0))
                 await asyncio.sleep(0.5)
 
         progress_bar.empty()
         status_text.empty()
         
-        # FINAL TIME CALCULATION
+        # 5. Calculate Stats
         t_total_end = time.time()
         total_duration = t_total_end - t_total_start
-        st.session_state.last_duration = total_duration
-        
-        logs.append(f"TOTAL TIME: {total_duration:.2f}s")
         st.session_state.fetch_logs = logs
         
-        return all_results
+        # Count Sources
+        counts = {"Bitget": 0, "BinanceUS": 0, "MEXC": 0}
+        for item in all_results:
+            src = item.get("Source", "Unknown")
+            counts[src] = counts.get(src, 0) + 1
+            
+        return all_results, counts, total_duration
 
     except Exception as e:
         st.error(f"Error: {e}")
-        return []
+        return [], {}, 0
     finally:
         for ex in all_exchanges.values():
             await ex.close()
@@ -252,9 +256,10 @@ def auto_scheduler():
         st.caption(f"🕒 Time: {now.strftime('%H:%M')} | Next: {next_run}")
     with col2:
         if st.button("🔄 Refresh", use_container_width=True):
-            st.session_state.crypto_data = None 
-            st.session_state.last_fetch_time = None 
-            st.rerun() 
+            st.session_state.crypto_data = None
+            st.session_state.last_fetch_time = None
+            st.session_state.source_counts = {"Bitget": 0, "BinanceUS": 0, "MEXC": 0} # Reset stats
+            st.rerun()
 
     should_fetch = False
     if st.session_state.crypto_data is None:
@@ -265,28 +270,33 @@ def auto_scheduler():
             should_fetch = True
 
     if should_fetch:
-        with st.spinner("🚀 Fetching from Bitget -> BinanceUS -> Bybit -> MEXC..."):
-            new_data = asyncio.run(get_all_data())
+        with st.spinner("🚀 Fetching Data from Bitget, BinanceUS, MEXC..."):
+            # Unpack the 3 return values
+            new_data, new_counts, duration = asyncio.run(get_all_data())
+            
             if new_data:
                 st.session_state.crypto_data = new_data
+                st.session_state.source_counts = new_counts
+                st.session_state.fetch_duration = duration
                 st.session_state.last_fetch_time = now
 
     if st.session_state.crypto_data:
         df = pd.DataFrame(st.session_state.crypto_data)
         
-        # METRICS ROW
-        m1, m2, m3, m4 = st.columns(4) # Added 4th column for Time
+        # --- ROW 1: General Stats ---
+        m1, m2, m3, m4 = st.columns(4)
         m1.metric("Total List", st.session_state.total_symbols_count)
         m2.metric("Fetched", len(df))
         m3.metric("Missing", len(st.session_state.missing_symbols), delta_color="inverse")
-        m4.metric("Total Time", f"{st.session_state.last_duration:.1f}s") # Show Time
+        m4.metric("⏱️ Total Time", f"{st.session_state.fetch_duration:.1f}s")
         
-        with st.expander("⏱️ Logs & Missing Symbols"):
-            tab1, tab2 = st.tabs(["Missing", "Logs"])
-            with tab1:
-                st.write(", ".join(st.session_state.missing_symbols) if st.session_state.missing_symbols else "None")
-            with tab2:
-                for log in st.session_state.fetch_logs: st.text(log)
+        # --- ROW 2: Source Breakdown ---
+        s1, s2, s3, s4 = st.columns(4)
+        counts = st.session_state.source_counts
+        s1.metric("🔵 Bitget", counts.get("Bitget", 0))
+        s2.metric("🟡 BinanceUS", counts.get("BinanceUS", 0))
+        s3.metric("🟢 MEXC", counts.get("MEXC", 0))
+        s4.empty() # Spacer
         
         st.divider()
 
@@ -301,13 +311,17 @@ def auto_scheduler():
             if v == -9999 or v is None: return ""
             return f'color: {"#4CAF50" if v > 0 else "#FF5252"}; font-weight: bold;'
 
-        # Added "Source" to columns
         st.dataframe(
             df.style.map(color, subset=['15m', '1h', '4h', '24h']).format({
                 "Price": fmt_prc, "15m": fmt_pct, "1h": fmt_pct, "4h": fmt_pct, "24h": fmt_pct
             }),
             use_container_width=True, height=800, on_select="ignore"
         )
+        
+        # Footer Expander
+        with st.expander("⚠️ Missing Symbols List"):
+             st.write(", ".join(st.session_state.missing_symbols) if st.session_state.missing_symbols else "None")
+
     else:
         st.info("Initializing...")
 
