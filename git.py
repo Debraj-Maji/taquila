@@ -6,7 +6,7 @@ import aiohttp
 from datetime import datetime, timedelta
 
 # --- Configuration ---
-st.set_page_config(page_title="CoinDCX Futures 15m Tracker", layout="wide")
+st.set_page_config(page_title="Crypto Futures Tracker", layout="wide")
 
 # Hide standard menus
 st.markdown("""
@@ -48,6 +48,7 @@ async def get_coindcx_futures_symbols():
 # --- 2. Optimized Fetching Logic ---
 
 def calculate_time_aligned_change(ohlcv, interval_hours):
+    """Calculates change based on aligned clock blocks (1h, 4h)"""
     if not ohlcv: return -9999
     ms_per_hour = 3600 * 1000
     ms_interval = interval_hours * ms_per_hour
@@ -72,6 +73,34 @@ def calculate_time_aligned_change(ohlcv, interval_hours):
         return ((close_price - open_price) / open_price) * 100
     return -9999
 
+def calculate_day_change(ohlcv):
+    """
+    Calculates change from TODAY 00:00 UTC to Last Completed Candle Close.
+    """
+    if not ohlcv or len(ohlcv) < 2: return -9999
+    
+    last_ts = ohlcv[-1][0] 
+    ms_per_day = 86400000 # 24 * 60 * 60 * 1000
+    start_of_day_ts = last_ts - (last_ts % ms_per_day)
+    
+    day_open_price = None
+    for candle in ohlcv:
+        if candle[0] == start_of_day_ts:
+            day_open_price = candle[1]
+            break
+            
+    last_completed_candle = ohlcv[-2]
+    last_completed_ts = last_completed_candle[0]
+    last_completed_close = last_completed_candle[4]
+    
+    if last_completed_ts < start_of_day_ts:
+        return 0.0
+        
+    if day_open_price is not None:
+        return ((last_completed_close - day_open_price) / day_open_price) * 100
+        
+    return -9999
+
 async def fetch_ohlcv_direct(exchange, symbol, source_name):
     """Fetch directly from the known valid exchange"""
     try:
@@ -90,7 +119,7 @@ async def fetch_ohlcv_direct(exchange, symbol, source_name):
             "15m": ((current_price - open_15m) / open_15m) * 100,
             "1h": calculate_time_aligned_change(ohlcv, 1),
             "4h": calculate_time_aligned_change(ohlcv, 4),
-            "24h": calculate_time_aligned_change(ohlcv, 24),
+            "24h": calculate_day_change(ohlcv), # <--- UPDATED LOGIC HERE
         }
     except Exception:
         return None
@@ -108,7 +137,7 @@ async def get_all_data():
     st.session_state.total_symbols_count = len(target_symbols)
     if not target_symbols: return []
 
-    # 2. Init Only Allowed Exchanges (BinanceUS & MEXC)
+    # 2. Init Only Allowed Exchanges
     all_exchanges = {
         'BinanceUS': ccxt.binanceus({'enableRateLimit': True}),
         'MEXC': ccxt.mexc({'enableRateLimit': True}) 
@@ -117,7 +146,7 @@ async def get_all_data():
     active_exchanges = {}
 
     try:
-        # 3. Load Markets (Just 2 calls now)
+        # 3. Load Markets
         tasks = [safe_load_markets(ex, name) for name, ex in all_exchanges.items()]
         results = await asyncio.gather(*tasks)
 
@@ -184,7 +213,7 @@ async def get_all_data():
 
 # --- 3. UI & Logic ---
 
-st.title("🌐 CoinDCX Tracker (BinanceUS + MEXC)")
+st.title("🌐 CoinDCX Tracker (Day Change)")
 
 @st.fragment(run_every=60)
 def auto_scheduler():
