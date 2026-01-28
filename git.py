@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timedelta
 
 # --- Configuration ---
-st.set_page_config(page_title="CoinDCX Futures Tracker", layout="wide")
+st.set_page_config(page_title="Crypto Futures Tracker", layout="wide")
 
 # Hide standard menus
 st.markdown("""
@@ -31,7 +31,6 @@ if 'fetch_logs' not in st.session_state:
     st.session_state.fetch_logs = []
 if 'market_map' not in st.session_state:
     st.session_state.market_map = None 
-# NEW: Stats Counters
 if 'source_counts' not in st.session_state:
     st.session_state.source_counts = {"Bitget": 0, "BinanceUS": 0, "MEXC": 0}
 if 'fetch_duration' not in st.session_state:
@@ -147,8 +146,8 @@ async def get_all_data():
     # 2. Init Exchanges
     all_exchanges = {
         'Bitget': ccxt.bitget({'options': {'defaultType': 'swap'}, 'enableRateLimit': True}),
-        'MEXC': ccxt.mexc({'enableRateLimit': True}),
-        'BinanceUS': ccxt.binanceus({'enableRateLimit': True})
+        'BinanceUS': ccxt.binanceus({'enableRateLimit': True}),
+        'MEXC': ccxt.mexc({'enableRateLimit': True})
     }
     
     active_exchanges = {}
@@ -226,7 +225,7 @@ async def get_all_data():
         st.session_state.fetch_logs = logs
         
         # Count Sources
-        counts = {"Bitget": 0, "BinanceUS": 0, "MEXC": 0}
+        counts = {"Bitget": 0, "MEXC": 0, "BinanceUS": 0}
         for item in all_results:
             src = item.get("Source", "Unknown")
             counts[src] = counts.get(src, 0) + 1
@@ -242,7 +241,7 @@ async def get_all_data():
 
 # --- 3. UI & Logic ---
 
-st.title("🌐 CoinDCX Futures Tracker")
+st.title("🌐 Crypto Futures Tracker")
 
 @st.fragment(run_every=60)
 def auto_scheduler():
@@ -255,10 +254,11 @@ def auto_scheduler():
         next_run = (now + timedelta(minutes=minutes_to_next)).strftime('%H:%M')
         st.caption(f"🕒 Time: {now.strftime('%H:%M')} | Next: {next_run}")
     with col2:
-        if st.button("🔄 Refresh", use_container_width=True):
+        # UPDATED: Replaced use_container_width=True with width="stretch"
+        if st.button("🔄 Refresh", width="stretch"):
             st.session_state.crypto_data = None
             st.session_state.last_fetch_time = None
-            st.session_state.source_counts = {"Bitget": 0, "BinanceUS": 0, "MEXC": 0} # Reset stats
+            st.session_state.source_counts = {"Bitget": 0, "BinanceUS": 0, "MEXC": 0}
             st.rerun()
 
     should_fetch = False
@@ -271,7 +271,6 @@ def auto_scheduler():
 
     if should_fetch:
         with st.spinner("🚀 Fetching Data from Bitget, BinanceUS, MEXC..."):
-            # Unpack the 3 return values
             new_data, new_counts, duration = asyncio.run(get_all_data())
             
             if new_data:
@@ -296,7 +295,7 @@ def auto_scheduler():
         s1.metric("🔵 Bitget", counts.get("Bitget", 0))
         s2.metric("🟡 BinanceUS", counts.get("BinanceUS", 0))
         s3.metric("🟢 MEXC", counts.get("MEXC", 0))
-        s4.empty() # Spacer
+        s4.empty()
         
         st.divider()
 
@@ -311,14 +310,16 @@ def auto_scheduler():
             if v == -9999 or v is None: return ""
             return f'color: {"#4CAF50" if v > 0 else "#FF5252"}; font-weight: bold;'
 
+        # UPDATED: Replaced use_container_width=True with width="stretch"
         st.dataframe(
             df.style.map(color, subset=['15m', '1h', '4h', '24h']).format({
                 "Price": fmt_prc, "15m": fmt_pct, "1h": fmt_pct, "4h": fmt_pct, "24h": fmt_pct
             }),
-            use_container_width=True, height=800, on_select="ignore"
+            width="stretch",
+            height=800,
+            on_select="ignore"
         )
         
-        # Footer Expander
         with st.expander("⚠️ Missing Symbols List"):
              st.write(", ".join(st.session_state.missing_symbols) if st.session_state.missing_symbols else "None")
 
@@ -326,4 +327,3 @@ def auto_scheduler():
         st.info("Initializing...")
 
 auto_scheduler()
-
