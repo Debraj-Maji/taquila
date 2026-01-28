@@ -90,61 +90,54 @@ async def get_crypto_data():
 
 # --- 3. Run Loop in Streamlit ---
 
+# --- 3. The New Display Logic (No Blur) ---
+
 st.title("🚀 Crypto Futures Tracker")
+st.caption("Live Bitget Data | Aligned to Clock Time | Updates every 10s")
 
-# Controls
-col1, col2 = st.columns([3, 1])
-with col1:
-    st.caption("Live Bitget Data | Aligned to Clock Time | Updates every 10s")
-with col2:
-    if st.button("Refresh Now"):
-        st.rerun()
+# @st.fragment keeps this part independent. It updates without reloading the whole page.
+@st.fragment(run_every=10)
+def show_live_data():
+    # 1. Setup Async Loop
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    # 2. Fetch Data
+    try:
+        data = loop.run_until_complete(get_crypto_data())
+    except Exception as e:
+        st.error(f"Connection Error: {e}")
+        return
+    finally:
+        loop.close()
 
-# Placeholder for the table
-table_placeholder = st.empty()
+    if not data:
+        st.warning("Fetching data...")
+        return
 
-async def run_app():
-    # We use a placeholder so the whole page doesn't reload, just the table
-    with table_placeholder.container():
-        st.info("Fetching latest data from Bitget... Please wait.")
-        
-        data = await get_crypto_data()
-        
-        if not data:
-            st.error("Failed to fetch data. Retrying...")
-            return
+    # 3. Process Data
+    df = pd.DataFrame(data)
+    df = df.sort_values(by="15m", ascending=False)
+    df.reset_index(drop=True, inplace=True)
+    df.index += 1
+    df.index.name = "Sr"
 
-        df = pd.DataFrame(data)
-        
-        # Sort by 15m by default, descending
-        df = df.sort_values(by="15m", ascending=False)
-        
-        # Reset Index to create a "Sr" column
-        df.reset_index(drop=True, inplace=True)
-        df.index += 1
-        df.index.name = "Sr"
+    # 4. Style Data
+    def color_map(val):
+        if val is None: return ""
+        # Green for positive, Red for negative
+        color = '#4CAF50' if val > 0 else '#FF5252'
+        return f'color: {color}; font-weight: bold;'
 
-        # Styling Logic for Colors
-        def color_map(val):
-            if val is None: return ""
-            color = '#4CAF50' if val > 0 else '#FF5252' # Green / Red
-            return f'color: {color}; font-weight: bold;'
+    # 5. Show Data
+    st.dataframe(
+        df.style.map(color_map, subset=['15m', '1h', '4h', '24h'])
+            .format({"Price": "${:.4f}", "15m": "{:.2f}%", "1h": "{:.2f}%", "4h": "{:.2f}%", "24h": "{:.2f}%"}),
+        use_container_width=True,
+        height=800
+    )
+    st.caption(f"Last Updated: {datetime.now().strftime('%H:%M:%S')}")
 
-        # Apply styles
-        st.dataframe(
-            df.style.applymap(color_map, subset=['15m', '1h', '4h', '24h'])
-                    .format({"Price": "${:.4f}", "15m": "{:.2f}%", "1h": "{:.2f}%", "4h": "{:.2f}%", "24h": "{:.2f}%"}),
-            use_container_width=True,
-            height=800  # Adjust height as needed
-        )
-        
-        st.caption(f"Last Updated: {datetime.now().strftime('%H:%M:%S')}")
-
-# Run the async function
-loop = asyncio.new_event_loop()
-asyncio.set_event_loop(loop)
-loop.run_until_complete(run_app())
-
-# Auto-refresh using Streamlit's rerun capability
-time.sleep(10)
+# Start the tracker
+show_live_data()
 st.rerun()
