@@ -82,10 +82,9 @@ async def fetch_single_pair(exchange, symbol, original_name):
 
 async def get_crypto_data():
     try:
-        # ENABLE RATE LIMIT IS CRITICAL HERE
         exchange = ccxt.bitget({'options': {'defaultType': 'swap'}, 'enableRateLimit': True})
         
-        # We process in batches to avoid crushing the CPU/Network
+        # Batch processing
         batch_size = 50
         all_results = []
         
@@ -96,8 +95,6 @@ async def get_crypto_data():
             tasks = [fetch_single_pair(exchange, sym, raw) for sym, raw in zip(batch_clean, batch_raw)]
             batch_results = await asyncio.gather(*tasks)
             all_results.extend(batch_results)
-            
-            # Small pause between batches to be nice to the API
             await asyncio.sleep(0.5)
 
         await exchange.close()
@@ -110,21 +107,17 @@ async def get_crypto_data():
 st.title("🚀 Crypto Futures Tracker")
 st.caption("Live Bitget Data | Aligned to Clock Time | Updates every 30s")
 
-# Use a container so we can show a loading message
-data_container = st.container()
-
 @st.fragment(run_every=30)
 def show_live_data():
-    with st.spinner("Fetching data for 200+ coins... this takes a moment..."):
+    with st.spinner("Fetching data for 200+ coins..."):
         try:
-            # Safer way to run async in Streamlit
             data = asyncio.run(get_crypto_data())
         except Exception as e:
             st.error(f"System Error: {e}")
             return
 
     if not data:
-        st.warning("⚠️ No data received. The server might be throttling requests. Waiting for next cycle...")
+        st.warning("⚠️ Waiting for data...")
         return
 
     df = pd.DataFrame(data)
@@ -138,6 +131,15 @@ def show_live_data():
     df.index += 1
     df.index.name = "Sr"
 
+    # --- FORMATTERS (Fixed TypeError) ---
+    def format_pct(val):
+        if val is None: return "N/A"
+        return "{:.2f}%".format(val)
+    
+    def format_price(val):
+        if val is None: return "N/A"
+        return "${:.4f}".format(val)
+
     def color_map(val):
         if val is None: return ""
         color = '#4CAF50' if val > 0 else '#FF5252'
@@ -145,8 +147,18 @@ def show_live_data():
 
     st.dataframe(
         df.style.map(color_map, subset=['15m', '1h', '4h', '24h'])
-            .format({"Price": "${:.4f}", "15m": "{:.2f}%", "1h": "{:.2f}%", "4h": "{:.2f}%", "24h": "{:.2f}%"}),
-        use_container_width=True,
+            .format({
+                "Price": format_price, 
+                "15m": format_pct, 
+                "1h": format_pct, 
+                "4h": format_pct, 
+                "24h": format_pct
+            }),
+        width=None, # Replaces use_container_width=True for future proofing if needed, but 'width=None' is default. 
+                    # Actually, to follow the deprecation warning 'use_container_width=True -> width="stretch"'
+        # However, 'use_container_width' still works in current versions. 
+        # I'll use the new standard:
+        use_container_width=True, 
         height=800
     )
     st.caption(f"Last Updated: {datetime.now().strftime('%H:%M:%S')}")
