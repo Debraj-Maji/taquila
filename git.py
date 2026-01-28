@@ -94,6 +94,16 @@ async def fetch_ohlcv_direct(exchange, symbol, source_name):
     except Exception:
         return None
 
+async def safe_load_markets(exchange, name):
+    """Safely load markets. If blocked (451), return False so we don't crash."""
+    try:
+        await exchange.load_markets()
+        return True
+    except Exception as e:
+        # If it's a 451 error (Geo-block) or timeout, we just skip this exchange
+        print(f"Skipping {name} due to error: {e}") 
+        return False
+
 async def get_all_data():
     # 1. Get Target List
     target_symbols = await get_coindcx_futures_symbols()
@@ -101,46 +111,56 @@ async def get_all_data():
     if not target_symbols: return []
 
     # 2. Init Exchanges
-    exchanges = {
+    all_exchanges = {
         'BinanceUS': ccxt.binanceus({'enableRateLimit': True}),
         'Binance': ccxt.binance({'enableRateLimit': True}),
         'Bybit': ccxt.bybit({'enableRateLimit': True}),
         'MEXC': ccxt.mexc({'enableRateLimit': True})
     }
 
-    try:
-        # 3. FAST MAPPING: Load markets once to see who has what
-        # This prevents 404 errors and useless API calls later
-        valid_map = {} # {'BTC/USDT': ('Binance', exchange_obj)}
-        
-        # Load markets concurrently
-        await asyncio.gather(*[ex.load_markets() for ex in exchanges.values()])
+    active_exchanges = {}
 
-        # Build the map based on priority
-        priority_order = ['BinanceUS', 'Binance', 'Bybit', 'MEXC']
+    try:
+        # 3. SAFE MAPPING: Load markets individually and check for blocks
+        # We run this in parallel but catch errors for each one
+        tasks = [safe_load_markets(ex, name) for name, ex in all_exchanges.items()]
+        results = await asyncio.gather(*tasks)
+
+        # Only keep exchanges that successfully loaded
+        for (name, ex), success in zip(all_exchanges.items(), results):
+            if success:
+                active_exchanges[name] = ex
+            else:
+                # Close the failed connection immediately
+                await ex.close()
+
+        if not active_exchanges:
+            st.error("All exchanges failed to connect. Check internet or API status.")
+            return []
+
+        # 4. Build Map using only ACTIVE exchanges
+        valid_map = {} 
+        # Priority: BinanceUS -> Binance -> Bybit -> MEXC
+        priority_order = [name for name in ['BinanceUS', 'Binance', 'Bybit', 'MEXC'] if name in active_exchanges]
         
         for symbol in target_symbols:
             for name in priority_order:
-                ex = exchanges[name]
+                ex = active_exchanges[name]
                 if symbol in ex.markets:
                     valid_map[symbol] = (name, ex)
                     break 
         
-        # 4. Fetch Data (Only for valid pairs)
-        # We can increase batch size because we have 0 fail rate now
+        # 5. Fetch Data
         batch_size = 50 
         all_results = []
         
-        # Identify missing symbols immediately
         found_keys = valid_map.keys()
         st.session_state.missing_symbols = [s for s in target_symbols if s not in found_keys]
 
-        # Prepare tasks
         tasks = []
         for symbol, (name, ex) in valid_map.items():
             tasks.append(fetch_ohlcv_direct(ex, symbol, name))
 
-        # Run in batches
         progress_bar = st.progress(0)
         status_text = st.empty()
         total_tasks = len(tasks)
@@ -153,7 +173,6 @@ async def get_all_data():
                 all_results.extend([r for r in results if r is not None])
                 
                 progress_bar.progress(min((i + batch_size) / total_tasks, 1.0))
-                # Small sleep to be kind to API limits
                 await asyncio.sleep(0.5)
 
         progress_bar.empty()
@@ -164,7 +183,8 @@ async def get_all_data():
         st.error(f"Error: {e}")
         return []
     finally:
-        for ex in exchanges.values():
+        # Close all active exchange connections
+        for ex in active_exchanges.values():
             await ex.close()
 
 # --- 3. UI & Logic ---
@@ -186,7 +206,6 @@ def auto_scheduler():
             st.session_state.last_fetch_time = None
             st.rerun()
 
-    # Trigger Logic
     should_fetch = False
     if st.session_state.crypto_data is None:
         should_fetch = True
@@ -196,17 +215,15 @@ def auto_scheduler():
             should_fetch = True
 
     if should_fetch:
-        with st.spinner("🚀 Mapping markets & fetching data..."):
+        with st.spinner("🚀 Connecting to exchanges (Skipping blocked ones)..."):
             new_data = asyncio.run(get_all_data())
             if new_data:
                 st.session_state.crypto_data = new_data
                 st.session_state.last_fetch_time = now
 
-    # Display
     if st.session_state.crypto_data:
         df = pd.DataFrame(st.session_state.crypto_data)
         
-        # Metrics
         m1, m2, m3 = st.columns(3)
         m1.metric("Total List", st.session_state.total_symbols_count)
         m2.metric("Fetched", len(df))
@@ -218,7 +235,6 @@ def auto_scheduler():
         
         st.divider()
 
-        # Table
         df = df.sort_values(by="15m", ascending=False)
         df.reset_index(drop=True, inplace=True)
         df.index += 1
