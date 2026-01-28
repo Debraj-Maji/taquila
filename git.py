@@ -213,7 +213,7 @@ async def get_all_data():
 
 # --- 3. UI & Logic ---
 
-st.title("🌐 CoinDCX Tracker (Day Change)")
+st.title("🌐 Crypto Tracker Future")
 
 @st.fragment(run_every=60)
 def auto_scheduler():
@@ -280,3 +280,4 @@ def auto_scheduler():
         st.info("Waiting for scheduled fetch...")
 
 auto_scheduler()
+
